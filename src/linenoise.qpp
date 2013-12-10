@@ -1,0 +1,412 @@
+/*
+  linenoise.qpp
+
+  Qore Programming Language
+
+  Copyright 2012-2013 Qore Technologies
+
+  This library is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License as published by the Free Software Foundation; either
+  version 2.1 of the License, or (at your option any later version.
+
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+
+#include <qore/Qore.h>
+#include <errno.h>
+
+extern "C" {
+#include "linenoise.h"
+}
+
+/** @mainpage %Qore %Linenoise Module
+
+
+The linenoise module provides readline-like functionality to Qore, allowing
+qore programs to manage comfortable user input in the command line.
+
+This module is released under a choice of two licenses:
+
+ - LGPL 2.1
+ - MIT (see COPYING.MIT in the source distribution for more information)
+
+The module is tagged as such in the module's header (meaning it can be
+loaded unconditionally regardless of how the Qore library was initialized).
+
+The underlying functionality is provided by Linenoise library, Steve Bennett's fork
+https://github.com/msteveb/linenoise
+of the original version
+https://github.com/antirez/linenoise
+
+
+@section basic_usage Basic Usage
+
+The core of functionality is the Qore::Linenoise::line function. It waits for user input
+providing basic and advanced edit functionality.
+
+@code
+%requires linenoise
+
+my *string $line;
+
+while (True) {
+    $line = Linenoise::line("prompt> ");
+    if (!exists $line) {
+        printf("^C signal caught. Exiting.\n");
+        break;
+    }
+
+    # process the $line value...
+}
+@endcode
+
+
+@section history_handling History Handling
+
+Linenoise module keeps history in its internal structure. To add a history item
+use @ref Qore::Linenoise::history_add
+
+Full history content can be obained with @ref Qore::Linenoise::history
+
+To handle history size use @ref Qore::Linenoise::history_set_max_len and
+@ref Qore::Linenoise::history_get_max_len
+
+History is not persistent for process. Memory is cleared when process ends.
+To store and load history content use @ref Qore::Linenoise::history_save
+and @ref Qore::Linenoise::history_load
+
+
+@section line_completion Line Completion
+
+User can start a line completion by pressing the TAB key when he is in @ref Qore::Linenoise::line.
+
+Then is the completion callback. An end user code has to be used for code completion.
+The user code is registered with @ref Qore::Linenoise::set_callback
+
+@note The callback function must accept \c string as an input argument and return a \c list.
+
+When the input argument won't be a string, the RUNTIME-OVERLOAD-ERROR exception will be thrown.
+
+When the return value won't be a list, the return will be ignored.
+
+Non string members of returned list will be converted to string (string representation
+of the list member will be used).
+
+<b>Example</b>
+@code
+# h<TAB> is expanded to string: history
+list sub my_callback(string $value) {
+    list $ret = ();
+    if ($value == 'h')
+        push $ret, 'history';
+
+    return $ret;
+}
+
+Linenoise::set_callback(\my_callback());
+
+@endcode
+
+
+@section key_shortcuts Keyboard Shortcuts
+
+<table>
+<tr><th>Shortcut</th><th>Alternative</th><th>Description</th></tr>
+<tr><td>\c Enter</td><td>\c Return</td><td>submit the user input</td></tr>
+<tr><td>\c Tab</td><td>&nbsp;</td><td>starts a code completion if the callback is defined, @ref line_completion</td></tr>
+<tr><td>\c Up</td><td>\c Ctrl+P</td><td>history move, one step up</td></tr>
+<tr><td>\c Down</td><td>\c Ctrl+N</td><td>history move, one step down</td></tr>
+<tr><td>\c PgUp<td>&nbsp;</td><td>move to start of history</td></tr>
+<tr><td>\c PgDown<td>&nbsp;</td><td>move to the end of history = current text</td></tr>
+<tr><td>\c Left</td><td>\c Ctrl+B</td><td>move by one char left</td></tr>
+<tr><td>\c Right</td><td>\c Ctrl+F</td><td>move by one char right</td></tr>
+<tr><td>\c Home</td><td>\c Ctrl+A</td><td>go to the start of the line</td></tr>
+<tr><td>\c End</td><td>\c Ctrl+E</td><td>go to the end of the line</td></tr>
+<tr><td>\c Ctrl+C<td>&nbsp;</td><td>keyboard interrupt, a @ref Qore::NOTHING is returned from Qore::Linenoise::line call</td></tr>
+<tr><td>\c Backspace</td><td>\c Ctrl+H</td><td>delete one char before</td></tr>
+<tr><td>\c Ctrl+D<td>&nbsp;</td><td>like a Ctrl+C when there is no user content in edit buffer, otherwise like a DELETE</td></tr>
+<tr><td>\c Ctrl+W<td>&nbsp;</td><td>delete word at left, save deleted chars</td></tr>
+<tr><td>\c Ctrl+R<td>&nbsp;</td><td>display the reverse-i-search prompt and process chars. See an additional controls for @ref find_key_shortcut</td></tr>
+<tr><td>\c Ctrl+T<td>&nbsp;</td><td>if cursor is at end, transpose the previous two chars</td></tr>
+<tr><td>\c Ctrl+V<td>&nbsp;</td><td>handle ^V sequence. Add ^V than waits for any other input or cancel ^V if it's in ^V mode already</td></tr>
+<tr><td>\c Ctrl+U<td>&nbsp;</td><td>delete to beginning of line, save deleted chars</td></tr>
+<tr><td>\c Ctrl+K<td>&nbsp;</td><td>delete from current to end of line, save deleted chars</td></tr>
+<tr><td>\c Ctrl+Y<td>&nbsp;</td><td>insert saved chars at current position</td></tr>
+<tr><td>\c Ctrl+L<td>&nbsp;</td><td>clear screen</td></tr>
+</table>
+
+@subsection find_key_shortcut Search Keyboard Shortcuts
+
+These shortcuts are valid in reverse-i-search (\c Ctrl+R) mode
+
+<table>
+<tr><th>Shortcut</th><th>Alternative</th><th>Description</th></tr>
+<tr><td>\c Delete</td><td>\c Ctrl+H</td><td>delete, return to normal operation mode if is the line empty</td></tr>
+<tr><td>\c Up</td><td>\c Ctrl+P</td><td>Search for the previous (earlier) match</td></tr>
+<tr><td>\c Down</td><td>\c Ctrl+N</td><td>Search for the next (later) match</td></tr>
+<tr><td>\c Ctrl+G</td><td>\c Ctrl+C</td><td>terminates the search with no effect</td></tr>
+<tr><td>\c Ctrl+J</td><td>&nbsp;</td><td>terminates the search leaving the buffer in place</td></tr>
+</table>
+
+*/
+
+static QoreNamespace LinenoiseNS("Linenoise");
+
+void init_linenoise_functions(QoreNamespace& ns);
+
+
+QoreThreadLock* lock;
+ResolvedCallReferenceNode* callbackNode = 0;
+
+
+void qore_lineoise_completion_cb(const char *input, linenoiseCompletions *qter) {
+//    AutoLocker al(lock);
+
+    if (!callbackNode) {
+        //printf("callback ignored, node is not set\n");
+        return;
+    }
+
+    ExceptionSink xsink;
+
+    QoreListNode *args = new QoreListNode();
+    args->push(new QoreStringNode(input));
+    AbstractQoreNode *ret = callbackNode->exec(args, &xsink);
+    args->deref(&xsink);
+
+    if (!ret) {
+        printf("Error while calling callback\n");
+        return;
+    }
+    else if (ret->getType() != NT_LIST) {
+        printf("Callback implementation does not return list\n");
+        return;
+    }
+
+    QoreListNode *lst = reinterpret_cast<QoreListNode*>(ret);
+    for (size_t i = 0; i < lst->size(); ++i) {
+        bool del;
+        AbstractQoreNode **n = lst->get_entry_ptr(i);
+        linenoiseAddCompletion(qter, (*n)->getStringRepresentation(del)->getBuffer());
+    }
+
+    lst->deref(&xsink);
+}
+
+QoreStringNode * linenoise_module_init() {
+    lock = new QoreThreadLock();
+
+    init_linenoise_functions(LinenoiseNS);
+
+    linenoiseSetCompletionCallback(qore_lineoise_completion_cb);
+    
+    return 0;
+}
+
+void linenoise_module_ns_init(QoreNamespace *rns, QoreNamespace *qns) {
+    qns->addNamespace(LinenoiseNS.copy());
+}
+
+void linenoise_module_delete() {
+    if (callbackNode) {
+        ExceptionSink xsink;
+        callbackNode->deref(&xsink);
+    }
+
+    delete lock;
+}
+
+
+// qore module symbols
+DLLEXPORT char qore_module_name[] = "linenoise";
+DLLEXPORT char qore_module_version[] = PACKAGE_VERSION;
+DLLEXPORT char qore_module_description[] = "Linenoise module";
+DLLEXPORT char qore_module_author[] = "Petr Vanek";
+DLLEXPORT char qore_module_url[] = "http://qore.org";
+DLLEXPORT int qore_module_api_major = QORE_MODULE_API_MAJOR;
+DLLEXPORT int qore_module_api_minor = QORE_MODULE_API_MINOR;
+DLLEXPORT qore_module_init_t qore_module_init = linenoise_module_init;
+DLLEXPORT qore_module_ns_init_t qore_module_ns_init = linenoise_module_ns_init;
+DLLEXPORT qore_module_delete_t qore_module_delete = linenoise_module_delete;
+DLLEXPORT qore_license_t qore_module_license = QL_LGPL;
+
+
+
+/** @defgroup linenoise_functions Linenoise Functions
+ */
+//@{
+namespace Qore::Linenoise;
+
+//! Main function to obtain line value
+/**
+
+    The function waits for user input confirmed by Enter.
+
+    @param prompt a custom string with prompt
+    @return User input string or @ref Qore::NOTHING when user sends ^C (Ctrl+C) interrupt signal
+
+    <b>Features:</b>
+    - accept basic user input: regular characters, cursor keys, TAB, ENTER keys
+    - accept advanced edits: Ctrl+key, @ref key_shortcuts
+    - waits until the ENTER is pressed
+
+    <b>Example:</b>
+    @code
+while (True) {
+    my *string $line = line("my prompt> ");
+    printf("echo: %s\n", $line);
+}
+    @endcode
+
+    @see @ref basic_usage
+ */
+string line(string prompt) {
+    AutoLocker al(lock);
+
+    char * ret = linenoise(prompt->getBuffer());
+    if (ret) {
+        QoreStringNode *s = new QoreStringNode(ret);
+        free(ret);
+        return s;
+    }
+    else
+        return nothing();
+}
+
+//! Add string to history
+/**
+    It adds new item to history. The history queue is shifted
+    if it hits the maximum history size.
+
+    @param line a string to be added
+ */
+int history_add(string line) {
+    AutoLocker al(lock);
+
+    return linenoiseHistoryAdd(line->getBuffer());
+}
+
+//! Set size of the history
+/**
+    @param len a new size
+ */
+int history_set_max_len(int len) {
+    AutoLocker al(lock);
+
+    return linenoiseHistorySetMaxLen(len);
+}
+
+//! get size of the history
+/**
+    @return int with size of history
+ */ 
+int history_get_max_len() {
+    AutoLocker al(lock);
+
+    return linenoiseHistoryGetMaxLen();
+}
+
+//! Save history to file
+/**
+    Save history queue to plain-text file.
+
+    @param filename a filename with relative or full path
+
+    @throw LINENOISE-HISTORY-SAVE-ERROR
+ */
+nothing history_save(string filename) {
+    AutoLocker al(lock);
+
+    if (linenoiseHistorySave(filename->getBuffer())) {
+        xsink->raiseException("LINENOISE-HISTORY-SAVE-ERROR",
+                              "error: %d; description: %s", errno, strerror(errno));
+    }
+}
+
+//! Load history from file
+/**
+    Load history queue from plain-text file.
+
+    @param filename a filename with relative or full path
+
+    @throw LINENOISE-HISTORY-LOAD-ERROR
+ */
+nothing history_load(string filename) {
+    AutoLocker al(lock);
+
+    if (linenoiseHistoryLoad(filename->getBuffer())) {
+        xsink->raiseException("LINENOISE-HISTORY-LOAD-ERROR",
+                              "error: %d; description: %s", errno, strerror(errno));
+    }
+}
+
+//! Clear the history
+nothing history_free() {
+    AutoLocker al(lock);
+
+    linenoiseHistoryFree();
+}
+
+//! Get complete history
+/**
+    Get complete history. History structure is limited by @ref Qore::Linenoise::history_set_max_len
+
+    @return list a list with histroy items. 0 index is the oldest.
+
+    @see @ref history_handling
+ */
+list history() {
+    AutoLocker al(lock);
+
+    int len;
+    char** data = linenoiseHistory(&len);
+    QoreListNode *ret = new QoreListNode();
+
+    for (int i = 0; i < len; ++i) {
+        ret->push(new QoreStringNode(data[i]));
+    }
+
+    return ret;
+}
+
+//! Get terminal width in characters.
+/**
+    @return int actual width of terminal window in characters
+ */
+int columns() {
+    AutoLocker al(lock);
+
+    return linenoiseColumns();
+}
+
+//! Set auto-completion callback function
+/**
+    @param code a funnction/method reference or a closure to handle completion callback
+
+    @see @ref line_completion
+
+    @warning Qore language does not support complex types yet so you can register
+             any code with this function. But if the function/code will not accept
+             the string argument the \c RUNTIME-OVERLOAD-ERROR exception will be
+             thrown
+ */
+nothing set_callback(code callback) {
+    AutoLocker al(lock);
+
+    if (callbackNode)
+        callbackNode->deref(xsink);
+    callbackNode = callback->refRefSelf();
+}
+
+
+//@}
+
+
