@@ -1,3 +1,5 @@
+#!/usr/bin/env qore
+
 %requires linenoise
 
 my *string $line;
