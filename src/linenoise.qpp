@@ -177,28 +177,24 @@ void qore_lineoise_completion_cb(const char *input, linenoiseCompletions *qter) 
 
     ExceptionSink xsink;
 
-    QoreListNode *args = new QoreListNode();
-    args->push(new QoreStringNode(input));
-    AbstractQoreNode *ret = callbackNode->exec(args, &xsink);
-    args->deref(&xsink);
-
-    if (!ret) {
-        printf("Error while calling callback\n");
-        return;
+    ValueHolder ret(&xsink);
+    {
+       ReferenceHolder<QoreListNode> args(new QoreListNode, &xsink);
+       args->push(new QoreStringNode(input));
+       ret = callbackNode->execValue(*args, &xsink);
     }
-    else if (ret->getType() != NT_LIST) {
+
+    if (ret->getType() != NT_LIST) {
         printf("Callback implementation does not return list\n");
         return;
     }
 
-    QoreListNode *lst = reinterpret_cast<QoreListNode*>(ret);
+    QoreListNode *lst = ret->get<QoreListNode>();
     for (size_t i = 0; i < lst->size(); ++i) {
         bool del;
         AbstractQoreNode **n = lst->get_entry_ptr(i);
         linenoiseAddCompletion(qter, (*n)->getStringRepresentation(del)->getBuffer());
     }
-
-    lst->deref(&xsink);
 }
 
 QoreStringNode * linenoise_module_init() {
