@@ -3,7 +3,7 @@
 
   Qore Programming Language
 
-  Copyright 2012-2013 Qore Technologies
+  Copyright 2012-2016 Qore Technologies
 
   This library is free software; you can redistribute it and/or
   modify it under the terms of the GNU Lesser General Public
@@ -49,22 +49,24 @@ https://github.com/antirez/linenoise
 
 @section basic_usage Basic Usage
 
-The core of functionality is the Qore::Linenoise::line function. It waits for user input
+The core of functionality is the Qore::Linenoise::line() function. It waits for user input
 providing basic and advanced edit functionality.
 
-@code
+@code{.py}
+%new-style
+%require-types
+%strict-args
+
 %requires linenoise
 
-my *string $line;
-
 while (True) {
-    $line = Linenoise::line("prompt> ");
-    if (!exists $line) {
+    *string line = Linenoise::line("prompt> ");
+    if (!exists line) {
         printf("^C signal caught. Exiting.\n");
         break;
     }
 
-    # process the $line value...
+    # process the line value...
 }
 @endcode
 
@@ -72,49 +74,47 @@ while (True) {
 @section history_handling History Handling
 
 Linenoise module keeps history in its internal structure. To add a history item
-use @ref Qore::Linenoise::history_add
+use @ref Qore::Linenoise::history_add()
 
 Full history content can be obained with @ref Qore::Linenoise::history
 
 To handle history size use @ref Qore::Linenoise::history_set_max_len and
 @ref Qore::Linenoise::history_get_max_len
 
-History is not persistent for process. Memory is cleared when process ends.
-To store and load history content use @ref Qore::Linenoise::history_save
-and @ref Qore::Linenoise::history_load
+History is not persistent accross processes (the memory is cleared when the process terminates).
+To store and load history content use @ref Qore::Linenoise::history_save()
+and @ref Qore::Linenoise::history_load()
 
 
 @section line_completion Line Completion
 
-User can start a line completion by pressing the TAB key when he is in @ref Qore::Linenoise::line.
+Users start line completion by pressing the TAB key when in @ref Qore::Linenoise::line().
 
-Then is the completion callback. An end user code has to be used for code completion.
-The user code is registered with @ref Qore::Linenoise::set_callback
+An callback has to be used to provide line completion values.
+The callback is registered with @ref Qore::Linenoise::set_callback().
 
-@note The callback function must accept \c string as an input argument and return a \c list.
+@note The callback code must accept a \c string as an input argument and return a \c list.
 
-When the input argument won't be a string, the RUNTIME-OVERLOAD-ERROR exception will be thrown.
+If the input argument isn't a string, a \c RUNTIME-OVERLOAD-ERROR exception will be thrown.
 
-When the return value won't be a list, the return will be ignored.
+If the return value isn't a list, the return will be ignored.
 
 Non string members of returned list will be converted to string (string representation
 of the list member will be used).
 
 <b>Example</b>
-@code
+@code{.py}
 # h<TAB> is expanded to string: history
-list sub my_callback(string $value) {
-    list $ret = ();
-    if ($value == 'h')
-        push $ret, 'history';
+list sub my_callback(string value) {
+    list ret = ();
+    if (value == 'h')
+        push ret, 'history';
 
-    return $ret;
+    return ret;
 }
 
 Linenoise::set_callback(\my_callback());
-
 @endcode
-
 
 @section key_shortcuts Keyboard Shortcuts
 
@@ -130,7 +130,7 @@ Linenoise::set_callback(\my_callback());
 <tr><td>\c Right</td><td>\c Ctrl+F</td><td>move by one char right</td></tr>
 <tr><td>\c Home</td><td>\c Ctrl+A</td><td>go to the start of the line</td></tr>
 <tr><td>\c End</td><td>\c Ctrl+E</td><td>go to the end of the line</td></tr>
-<tr><td>\c Ctrl+C<td>&nbsp;</td><td>keyboard interrupt, a @ref Qore::NOTHING is returned from Qore::Linenoise::line call</td></tr>
+<tr><td>\c Ctrl+C<td>&nbsp;</td><td>keyboard interrupt, @ref nothing "NOTHING" is returned from Qore::Linenoise::line() call</td></tr>
 <tr><td>\c Backspace</td><td>\c Ctrl+H</td><td>delete one char before</td></tr>
 <tr><td>\c Ctrl+D<td>&nbsp;</td><td>like a Ctrl+C when there is no user content in edit buffer, otherwise like a DELETE</td></tr>
 <tr><td>\c Ctrl+W<td>&nbsp;</td><td>delete word at left, save deleted chars</td></tr>
@@ -149,7 +149,7 @@ These shortcuts are valid in reverse-i-search (\c Ctrl+R) mode
 
 <table>
 <tr><th>Shortcut</th><th>Alternative</th><th>Description</th></tr>
-<tr><td>\c Delete</td><td>\c Ctrl+H</td><td>delete, return to normal operation mode if is the line empty</td></tr>
+<tr><td>\c Delete</td><td>\c Ctrl+H</td><td>delete, return to normal operation mode if the line is empty</td></tr>
 <tr><td>\c Up</td><td>\c Ctrl+P</td><td>Search for the previous (earlier) match</td></tr>
 <tr><td>\c Down</td><td>\c Ctrl+N</td><td>Search for the next (later) match</td></tr>
 <tr><td>\c Ctrl+G</td><td>\c Ctrl+C</td><td>terminates the search with no effect</td></tr>
@@ -203,7 +203,7 @@ QoreStringNode * linenoise_module_init() {
     init_linenoise_functions(LinenoiseNS);
 
     linenoiseSetCompletionCallback(qore_lineoise_completion_cb);
-    
+
     return 0;
 }
 
@@ -247,7 +247,7 @@ namespace Qore::Linenoise;
     The function waits for user input confirmed by Enter.
 
     @param prompt a custom string with prompt
-    @return User input string or @ref Qore::NOTHING when user sends ^C (Ctrl+C) interrupt signal
+    @return User input string or @ref Qore::NOTHING if the user sends ^C (Ctrl+C) interrupt signal
 
     <b>Features:</b>
     - accept basic user input: regular characters, cursor keys, TAB, ENTER keys
@@ -255,10 +255,10 @@ namespace Qore::Linenoise;
     - waits until the ENTER is pressed
 
     <b>Example:</b>
-    @code
+    @code{.py}
 while (True) {
-    my *string $line = line("my prompt> ");
-    printf("echo: %s\n", $line);
+    *string line = line("my prompt> ");
+    printf("echo: %s\n", line);
 }
     @endcode
 
@@ -303,7 +303,7 @@ int history_set_max_len(int len) {
 //! get size of the history
 /**
     @return int with size of history
- */ 
+ */
 int history_get_max_len() {
     AutoLocker al(lock);
 
@@ -353,7 +353,7 @@ nothing history_free() {
 
 //! Get complete history
 /**
-    Get complete history. History structure is limited by @ref Qore::Linenoise::history_set_max_len
+    Get complete history. History structure is limited by @ref Qore::Linenoise::history_set_max_len()
 
     @return list a list with histroy items. 0 index is the oldest.
 
@@ -404,5 +404,3 @@ nothing set_callback(code callback) {
 
 
 //@}
-
-
