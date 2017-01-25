@@ -3,7 +3,7 @@
 
   Qore Programming Language
 
-  Copyright 2012-2013 Qore Technologies
+  Copyright 2012 - 2017 Qore Technologies, s.r.o.
 
   This library is free software; you can redistribute it and/or
   modify it under the terms of the GNU Lesser General Public
@@ -203,7 +203,7 @@ QoreStringNode * linenoise_module_init() {
     init_linenoise_functions(LinenoiseNS);
 
     linenoiseSetCompletionCallback(qore_lineoise_completion_cb);
-    
+
     return 0;
 }
 
@@ -219,7 +219,6 @@ void linenoise_module_delete() {
 
     delete lock;
 }
-
 
 // qore module symbols
 DLLEXPORT char qore_module_name[] = "linenoise";
@@ -303,7 +302,7 @@ int history_set_max_len(int len) {
 //! get size of the history
 /**
     @return int with size of history
- */ 
+ */
 int history_get_max_len() {
     AutoLocker al(lock);
 
@@ -404,5 +403,3 @@ nothing set_callback(code callback) {
 
 
 //@}
-
-
