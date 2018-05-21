@@ -1,24 +1,23 @@
 /*
-  linenoise.qpp
+    linenoise.qpp
 
-  Qore Programming Language
+    Qore Programming Language
 
-  Copyright 2012 - 2017 Qore Technologies, s.r.o.
+    Copyright 2012 - 2018 Qore Technologies, s.r.o.
 
-  This library is free software; you can redistribute it and/or
-  modify it under the terms of the GNU Lesser General Public
-  License as published by the Free Software Foundation; either
-  version 2.1 of the License, or (at your option any later version.
+    This library is free software; you can redistribute it and/or
+    modify it under the terms of the GNU Lesser General Public
+    License as published by the Free Software Foundation; either
+    version 2.1 of the License, or (at your option any later version.
 
-  but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  Lesser General Public License for more details.
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+    Lesser General Public License for more details.
 
-  You should have received a copy of the GNU Lesser General Public
-  License along with this library; if not, write to the Free Software
-  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+    You should have received a copy of the GNU Lesser General Public
+    License along with this library; if not, write to the Free Software
+    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
-
 
 #include <qore/Qore.h>
 #include <errno.h>
@@ -163,8 +162,8 @@ static QoreNamespace LinenoiseNS("Linenoise");
 void init_linenoise_functions(QoreNamespace& ns);
 
 
-QoreThreadLock* lock;
-ResolvedCallReferenceNode* callbackNode = 0;
+QoreThreadLock lock;
+ResolvedCallReferenceNode* callbackNode = nullptr;
 
 
 void qore_lineoise_completion_cb(const char *input, linenoiseCompletions *qter) {
@@ -179,8 +178,8 @@ void qore_lineoise_completion_cb(const char *input, linenoiseCompletions *qter) 
 
     ValueHolder ret(&xsink);
     {
-       ReferenceHolder<QoreListNode> args(new QoreListNode, &xsink);
-       args->push(new QoreStringNode(input));
+       ReferenceHolder<QoreListNode> args(new QoreListNode(autoTypeInfo), &xsink);
+       args->push(new QoreStringNode(input), nullptr);
        ret = callbackNode->execValue(*args, &xsink);
     }
 
@@ -189,17 +188,14 @@ void qore_lineoise_completion_cb(const char *input, linenoiseCompletions *qter) 
         return;
     }
 
-    QoreListNode *lst = ret->get<QoreListNode>();
+    QoreListNode* lst = ret->get<QoreListNode>();
     for (size_t i = 0; i < lst->size(); ++i) {
-        bool del;
-        AbstractQoreNode **n = lst->get_entry_ptr(i);
-        linenoiseAddCompletion(qter, (*n)->getStringRepresentation(del)->getBuffer());
+        QoreStringValueHelper str(lst->retrieveEntry(i));
+        linenoiseAddCompletion(qter, str->c_str());
     }
 }
 
 QoreStringNode * linenoise_module_init() {
-    lock = new QoreThreadLock();
-
     init_linenoise_functions(LinenoiseNS);
 
     linenoiseSetCompletionCallback(qore_lineoise_completion_cb);
@@ -216,8 +212,6 @@ void linenoise_module_delete() {
         ExceptionSink xsink;
         callbackNode->deref(&xsink);
     }
-
-    delete lock;
 }
 
 // qore module symbols
@@ -358,15 +352,15 @@ nothing history_free() {
 
     @see @ref history_handling
  */
-list history() {
+list<auto> history() {
     AutoLocker al(lock);
 
     int len;
     char** data = linenoiseHistory(&len);
-    QoreListNode *ret = new QoreListNode();
+    QoreListNode*ret = new QoreListNode(autoTypeInfo);
 
     for (int i = 0; i < len; ++i) {
-        ret->push(new QoreStringNode(data[i]));
+        ret->push(new QoreStringNode(data[i]), xsink);
     }
 
     return ret;
