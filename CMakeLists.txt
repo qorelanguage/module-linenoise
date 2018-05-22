@@ -33,7 +33,7 @@ set(QPP_SRC
 
 add_definitions(-DUSE_UTF8)
 
-qore_wrap_qpp(QPP_SOURCES ${QPP_SRC})
+qore_wrap_qpp_value(QPP_SOURCES ${QPP_SRC})
 
 SET (module_name "linenoise")
 
