@@ -49,7 +49,6 @@ qore_dist("${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}")
 
 qore_config_info()
 
-FIND_PACKAGE(Doxygen)
 if (DOXYGEN_FOUND)
   qore_wrap_dox(QORE_DOX_SRC ${QORE_DOX_TMPL_SRC})
   add_custom_target(QORE_MOD_DOX_FILES DEPENDS ${QORE_DOX_SRC})
