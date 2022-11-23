@@ -39,6 +39,10 @@ SET (module_name "linenoise")
 
 add_library(${module_name} MODULE ${CPP_SRC} ${QPP_SOURCES})
 
+if (DEFINED ENV{DOXYGEN_EXECUTABLE})
+    set(DOXYGEN_EXECUTABLE $ENV{DOXYGEN_EXECUTABLE})
+endif()
+
 qore_external_binary_module(${module_name} "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}")
 
 qore_dist("${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}")
