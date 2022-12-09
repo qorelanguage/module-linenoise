@@ -231,7 +231,7 @@ DLLEXPORT qore_license_t qore_module_license = QL_LGPL;
 
 /** @defgroup linenoise_functions Linenoise Functions
  */
-//@{
+///@{
 namespace Qore::Linenoise;
 
 //! Main function to obtain line value
@@ -396,4 +396,4 @@ nothing set_callback(code callback) {
 }
 
 
-//@}
+///@}
