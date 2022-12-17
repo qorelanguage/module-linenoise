@@ -1,0 +1,54 @@
+#!/usr/bin/env qore
+
+%requires linenoise
+
+%new-style
+%require-types
+%strict-args
+%enable-all-warnings
+
+Linenoise::history_set_max_len(10);
+
+# h<TAB> is expanded to string: history
+code my_callback = list<string> sub (string value) {
+    list<string> ret = ();
+    if (value == 'h') {
+        ret += 'history';
+    } else if (value == 'q') {
+        ret += 'quit';
+    }
+
+    return ret;
+};
+
+Linenoise::set_callback(my_callback);
+
+try {
+    Linenoise::history_load('history.txt');
+} catch (hash<ExceptionInfo> ex) {
+    printf("History is not loaded: %s: %s\n", ex.err, ex.desc);
+}
+
+while (True) {
+    *string line = Linenoise::line("Example Prompt> ");
+    if (!exists line) {
+        printf("^C signal caught. Exiting.\n");
+        break;
+    }
+
+    if (line == 'quit') {
+        printf("exiting on user request\n");
+        break;
+    } else if (line == 'help' || line == '?') {
+        printf("commands:\n\thelp\n\tquit\n\thistory\n");
+        continue;
+    } else if (line == 'history' || line == 'h') {
+        printf("history:\n%N\n", Linenoise::history());
+        continue;
+    }
+
+    Linenoise::history_add(line);
+    printf("OK, doing: '%s'\n", line);
+}
+
+Linenoise::history_save('history.txt');

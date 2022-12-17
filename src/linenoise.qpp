@@ -69,7 +69,6 @@ while (True) {
 }
 @endcode
 
-
 @section history_handling History Handling
 
 Linenoise module keeps history in its internal structure. To add a history item
