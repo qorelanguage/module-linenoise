@@ -155,7 +155,7 @@ Linenoise::set_callback(\my_callback());
     <tr><td>\c Ctrl+J</td><td>&nbsp;</td><td>terminates the search leaving the buffer in place</td></tr>
     </table>
 
-    @section jnireleasenotes jni Module Release Notes
+    @section linenoisereleasenotes linenoise Module Release Notes
 
     @subsection linenoise_1_0_1 linenoise Module Version 1.0.1
     - updated to build with \c qpp from %Qore 1.12.4+
