@@ -3,7 +3,7 @@
 
     Qore Programming Language
 
-    Copyright 2012 - 2018 Qore Technologies, s.r.o.
+    Copyright 2012 - 2022 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -28,30 +28,32 @@ extern "C" {
 
 /** @mainpage %Qore %Linenoise Module
 
+    @tableofcontents
 
-The linenoise module provides readline-like functionality to Qore, allowing
-qore programs to manage comfortable user input in the command line.
+    @section jniintro jni Module Introduction
 
-This module is released under a choice of two licenses:
+    The linenoise module provides readline-like functionality to Qore, allowing
+    qore programs to manage comfortable user input in the command line.
 
- - LGPL 2.1
- - MIT (see COPYING.MIT in the source distribution for more information)
+    This module is released under a choice of two licenses:
 
-The module is tagged as such in the module's header (meaning it can be
-loaded unconditionally regardless of how the Qore library was initialized).
+    - LGPL 2.1
+    - MIT (see COPYING.MIT in the source distribution for more information)
 
-The underlying functionality is provided by Linenoise library, Steve Bennett's fork
-https://github.com/msteveb/linenoise
-of the original version
-https://github.com/antirez/linenoise
+    The module is tagged as such in the module's header (meaning it can be
+    loaded unconditionally regardless of how the Qore library was initialized).
 
+    The underlying functionality is provided by Linenoise library, Steve Bennett's fork
+    https://github.com/msteveb/linenoise
+    of the original version
+    https://github.com/antirez/linenoise
 
-@section basic_usage Basic Usage
+    @section basic_usage Basic Usage
 
-The core of functionality is the Qore::Linenoise::line() function. It waits for user input
-providing basic and advanced edit functionality.
+    The core of functionality is the Qore::Linenoise::line() function. It waits for user input
+    providing basic and advanced edit functionality.
 
-@code{.py}
+    @code{.py}
 %new-style
 %require-types
 %strict-args
@@ -67,41 +69,40 @@ while (True) {
 
     # process the line value...
 }
-@endcode
+    @endcode
 
-@section history_handling History Handling
+    @section history_handling History Handling
 
-Linenoise module keeps history in its internal structure. To add a history item
-use @ref Qore::Linenoise::history_add()
+    Linenoise module keeps history in its internal structure. To add a history item
+    use @ref Qore::Linenoise::history_add()
 
-Full history content can be obained with @ref Qore::Linenoise::history
+    Full history content can be obained with @ref Qore::Linenoise::history
 
-To handle history size use @ref Qore::Linenoise::history_set_max_len and
-@ref Qore::Linenoise::history_get_max_len
+    To handle history size use @ref Qore::Linenoise::history_set_max_len and
+    @ref Qore::Linenoise::history_get_max_len
 
-History is not persistent accross processes (the memory is cleared when the process terminates).
-To store and load history content use @ref Qore::Linenoise::history_save()
-and @ref Qore::Linenoise::history_load()
+    History is not persistent accross processes (the memory is cleared when the process terminates).
+    To store and load history content use @ref Qore::Linenoise::history_save()
+    and @ref Qore::Linenoise::history_load()
 
+    @section line_completion Line Completion
 
-@section line_completion Line Completion
+    Users start line completion by pressing the TAB key when in @ref Qore::Linenoise::line().
 
-Users start line completion by pressing the TAB key when in @ref Qore::Linenoise::line().
+    An callback has to be used to provide line completion values.
+    The callback is registered with @ref Qore::Linenoise::set_callback().
 
-An callback has to be used to provide line completion values.
-The callback is registered with @ref Qore::Linenoise::set_callback().
+    @note The callback code must accept a \c string as an input argument and return a \c list.
 
-@note The callback code must accept a \c string as an input argument and return a \c list.
+    If the input argument isn't a string, a \c RUNTIME-OVERLOAD-ERROR exception will be thrown.
 
-If the input argument isn't a string, a \c RUNTIME-OVERLOAD-ERROR exception will be thrown.
+    If the return value isn't a list, the return will be ignored.
 
-If the return value isn't a list, the return will be ignored.
+    Non string members of returned list will be converted to string (string representation
+    of the list member will be used).
 
-Non string members of returned list will be converted to string (string representation
-of the list member will be used).
-
-<b>Example</b>
-@code{.py}
+    <b>Example</b>
+    @code{.py}
 # h<TAB> is expanded to string: history
 list sub my_callback(string value) {
     list ret = ();
@@ -112,58 +113,63 @@ list sub my_callback(string value) {
 }
 
 Linenoise::set_callback(\my_callback());
-@endcode
+    @endcode
 
-@section key_shortcuts Keyboard Shortcuts
+    @section key_shortcuts Keyboard Shortcuts
 
-<table>
-<tr><th>Shortcut</th><th>Alternative</th><th>Description</th></tr>
-<tr><td>\c Enter</td><td>\c Return</td><td>submit the user input</td></tr>
-<tr><td>\c Tab</td><td>&nbsp;</td><td>starts a code completion if the callback is defined, @ref line_completion</td></tr>
-<tr><td>\c Up</td><td>\c Ctrl+P</td><td>history move, one step up</td></tr>
-<tr><td>\c Down</td><td>\c Ctrl+N</td><td>history move, one step down</td></tr>
-<tr><td>\c PgUp<td>&nbsp;</td><td>move to start of history</td></tr>
-<tr><td>\c PgDown<td>&nbsp;</td><td>move to the end of history = current text</td></tr>
-<tr><td>\c Left</td><td>\c Ctrl+B</td><td>move by one char left</td></tr>
-<tr><td>\c Right</td><td>\c Ctrl+F</td><td>move by one char right</td></tr>
-<tr><td>\c Home</td><td>\c Ctrl+A</td><td>go to the start of the line</td></tr>
-<tr><td>\c End</td><td>\c Ctrl+E</td><td>go to the end of the line</td></tr>
-<tr><td>\c Ctrl+C<td>&nbsp;</td><td>keyboard interrupt, @ref nothing "NOTHING" is returned from Qore::Linenoise::line() call</td></tr>
-<tr><td>\c Backspace</td><td>\c Ctrl+H</td><td>delete one char before</td></tr>
-<tr><td>\c Ctrl+D<td>&nbsp;</td><td>like a Ctrl+C when there is no user content in edit buffer, otherwise like a DELETE</td></tr>
-<tr><td>\c Ctrl+W<td>&nbsp;</td><td>delete word at left, save deleted chars</td></tr>
-<tr><td>\c Ctrl+R<td>&nbsp;</td><td>display the reverse-i-search prompt and process chars. See an additional controls for @ref find_key_shortcut</td></tr>
-<tr><td>\c Ctrl+T<td>&nbsp;</td><td>if cursor is at end, transpose the previous two chars</td></tr>
-<tr><td>\c Ctrl+V<td>&nbsp;</td><td>handle ^V sequence. Add ^V than waits for any other input or cancel ^V if it's in ^V mode already</td></tr>
-<tr><td>\c Ctrl+U<td>&nbsp;</td><td>delete to beginning of line, save deleted chars</td></tr>
-<tr><td>\c Ctrl+K<td>&nbsp;</td><td>delete from current to end of line, save deleted chars</td></tr>
-<tr><td>\c Ctrl+Y<td>&nbsp;</td><td>insert saved chars at current position</td></tr>
-<tr><td>\c Ctrl+L<td>&nbsp;</td><td>clear screen</td></tr>
-</table>
+    <table>
+    <tr><th>Shortcut</th><th>Alternative</th><th>Description</th></tr>
+    <tr><td>\c Enter</td><td>\c Return</td><td>submit the user input</td></tr>
+    <tr><td>\c Tab</td><td>&nbsp;</td><td>starts a code completion if the callback is defined, @ref line_completion</td></tr>
+    <tr><td>\c Up</td><td>\c Ctrl+P</td><td>history move, one step up</td></tr>
+    <tr><td>\c Down</td><td>\c Ctrl+N</td><td>history move, one step down</td></tr>
+    <tr><td>\c PgUp<td>&nbsp;</td><td>move to start of history</td></tr>
+    <tr><td>\c PgDown<td>&nbsp;</td><td>move to the end of history = current text</td></tr>
+    <tr><td>\c Left</td><td>\c Ctrl+B</td><td>move by one char left</td></tr>
+    <tr><td>\c Right</td><td>\c Ctrl+F</td><td>move by one char right</td></tr>
+    <tr><td>\c Home</td><td>\c Ctrl+A</td><td>go to the start of the line</td></tr>
+    <tr><td>\c End</td><td>\c Ctrl+E</td><td>go to the end of the line</td></tr>
+    <tr><td>\c Ctrl+C<td>&nbsp;</td><td>keyboard interrupt, @ref nothing "NOTHING" is returned from Qore::Linenoise::line() call</td></tr>
+    <tr><td>\c Backspace</td><td>\c Ctrl+H</td><td>delete one char before</td></tr>
+    <tr><td>\c Ctrl+D<td>&nbsp;</td><td>like a Ctrl+C when there is no user content in edit buffer, otherwise like a DELETE</td></tr>
+    <tr><td>\c Ctrl+W<td>&nbsp;</td><td>delete word at left, save deleted chars</td></tr>
+    <tr><td>\c Ctrl+R<td>&nbsp;</td><td>display the reverse-i-search prompt and process chars. See an additional controls for @ref find_key_shortcut</td></tr>
+    <tr><td>\c Ctrl+T<td>&nbsp;</td><td>if cursor is at end, transpose the previous two chars</td></tr>
+    <tr><td>\c Ctrl+V<td>&nbsp;</td><td>handle ^V sequence. Add ^V than waits for any other input or cancel ^V if it's in ^V mode already</td></tr>
+    <tr><td>\c Ctrl+U<td>&nbsp;</td><td>delete to beginning of line, save deleted chars</td></tr>
+    <tr><td>\c Ctrl+K<td>&nbsp;</td><td>delete from current to end of line, save deleted chars</td></tr>
+    <tr><td>\c Ctrl+Y<td>&nbsp;</td><td>insert saved chars at current position</td></tr>
+    <tr><td>\c Ctrl+L<td>&nbsp;</td><td>clear screen</td></tr>
+    </table>
 
-@subsection find_key_shortcut Search Keyboard Shortcuts
+    @subsection find_key_shortcut Search Keyboard Shortcuts
 
-These shortcuts are valid in reverse-i-search (\c Ctrl+R) mode
+    These shortcuts are valid in reverse-i-search (\c Ctrl+R) mode
 
-<table>
-<tr><th>Shortcut</th><th>Alternative</th><th>Description</th></tr>
-<tr><td>\c Delete</td><td>\c Ctrl+H</td><td>delete, return to normal operation mode if the line is empty</td></tr>
-<tr><td>\c Up</td><td>\c Ctrl+P</td><td>Search for the previous (earlier) match</td></tr>
-<tr><td>\c Down</td><td>\c Ctrl+N</td><td>Search for the next (later) match</td></tr>
-<tr><td>\c Ctrl+G</td><td>\c Ctrl+C</td><td>terminates the search with no effect</td></tr>
-<tr><td>\c Ctrl+J</td><td>&nbsp;</td><td>terminates the search leaving the buffer in place</td></tr>
-</table>
+    <table>
+    <tr><th>Shortcut</th><th>Alternative</th><th>Description</th></tr>
+    <tr><td>\c Delete</td><td>\c Ctrl+H</td><td>delete, return to normal operation mode if the line is empty</td></tr>
+    <tr><td>\c Up</td><td>\c Ctrl+P</td><td>Search for the previous (earlier) match</td></tr>
+    <tr><td>\c Down</td><td>\c Ctrl+N</td><td>Search for the next (later) match</td></tr>
+    <tr><td>\c Ctrl+G</td><td>\c Ctrl+C</td><td>terminates the search with no effect</td></tr>
+    <tr><td>\c Ctrl+J</td><td>&nbsp;</td><td>terminates the search leaving the buffer in place</td></tr>
+    </table>
 
+    @section jnireleasenotes jni Module Release Notes
+
+    @subsection linenoise_1_0_1 linenoise Module Version 1.0.1
+    - updated to build with \c qpp from %Qore 1.12.4+
+
+    @subsection linenoise_1_0_0 linenoise Module Version 1.0.0
+    - initial release
 */
 
 static QoreNamespace LinenoiseNS("Linenoise");
 
 void init_linenoise_functions(QoreNamespace& ns);
 
-
 QoreThreadLock lock;
 ResolvedCallReferenceNode* callbackNode = nullptr;
-
 
 void qore_lineoise_completion_cb(const char *input, linenoiseCompletions *qter) {
 //    AutoLocker al(lock);
@@ -226,8 +232,6 @@ DLLEXPORT qore_module_ns_init_t qore_module_ns_init = linenoise_module_ns_init;
 DLLEXPORT qore_module_delete_t qore_module_delete = linenoise_module_delete;
 DLLEXPORT qore_license_t qore_module_license = QL_LGPL;
 
-
-
 /** @defgroup linenoise_functions Linenoise Functions
  */
 ///@{
@@ -235,7 +239,6 @@ namespace Qore::Linenoise;
 
 //! Main function to obtain line value
 /**
-
     The function waits for user input confirmed by Enter.
 
     @param prompt a custom string with prompt
@@ -393,6 +396,4 @@ nothing set_callback(code callback) {
         callbackNode->deref(xsink);
     callbackNode = callback->refRefSelf();
 }
-
-
 ///@}
