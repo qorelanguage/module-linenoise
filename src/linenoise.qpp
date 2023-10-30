@@ -30,7 +30,7 @@ extern "C" {
 
     @tableofcontents
 
-    @section jniintro jni Module Introduction
+    @section linenoiseintro linenoise Module Introduction
 
     The linenoise module provides readline-like functionality to Qore, allowing
     qore programs to manage comfortable user input in the command line.
@@ -262,14 +262,14 @@ while (True) {
 string line(string prompt) {
     AutoLocker al(lock);
 
-    char * ret = linenoise(prompt->getBuffer());
+    char * ret = linenoise(prompt->c_str());
     if (ret) {
         QoreStringNode *s = new QoreStringNode(ret);
         free(ret);
         return s;
-    }
-    else
+    } else {
         return nothing();
+    }
 }
 
 //! Add string to history
@@ -282,7 +282,7 @@ string line(string prompt) {
 int history_add(string line) {
     AutoLocker al(lock);
 
-    return linenoiseHistoryAdd(line->getBuffer());
+    return linenoiseHistoryAdd(line->c_str());
 }
 
 //! Set size of the history
@@ -316,7 +316,7 @@ int history_get_max_len() {
 nothing history_save(string filename) {
     AutoLocker al(lock);
 
-    if (linenoiseHistorySave(filename->getBuffer())) {
+    if (linenoiseHistorySave(filename->c_str())) {
         xsink->raiseException("LINENOISE-HISTORY-SAVE-ERROR",
                               "error: %d; description: %s", errno, strerror(errno));
     }
@@ -333,7 +333,7 @@ nothing history_save(string filename) {
 nothing history_load(string filename) {
     AutoLocker al(lock);
 
-    if (linenoiseHistoryLoad(filename->getBuffer())) {
+    if (linenoiseHistoryLoad(filename->c_str())) {
         xsink->raiseException("LINENOISE-HISTORY-LOAD-ERROR",
                               "error: %d; description: %s", errno, strerror(errno));
     }
