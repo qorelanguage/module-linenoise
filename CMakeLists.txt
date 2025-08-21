@@ -3,13 +3,13 @@ cmake_minimum_required(VERSION 2.8.12)
 project(qore-linenoise-module)
 
 set (VERSION_MAJOR 1)
-set (VERSION_MINOR 0)
-set (VERSION_PATCH 1)
+set (VERSION_MINOR 1)
+set (VERSION_PATCH 0)
 
 # where to look first for cmake modules, before ${CMAKE_ROOT}/Modules/ is checked
 set(CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake )
 
-FIND_PACKAGE (Qore 0.9 REQUIRED)
+FIND_PACKAGE (Qore 2.0 REQUIRED)
 
 include_directories( ${CMAKE_SOURCE_DIR}/src )
 include_directories( ${CMAKE_SOURCE_DIR}/src/linenoise )
@@ -24,8 +24,9 @@ else()
 endif()
 
 set(CPP_SRC
-    src/linenoise/linenoise.c
-    src/linenoise/utf8.c
+    src/linenoise/ConvertUTF.cpp
+    src/linenoise/linenoise.cpp
+    src/linenoise/wcwidth.cpp
 )
 set(QPP_SRC
     src/linenoise.qpp

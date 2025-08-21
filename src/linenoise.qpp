@@ -3,7 +3,7 @@
 
     Qore Programming Language
 
-    Copyright 2012 - 2022 Qore Technologies, s.r.o.
+    Copyright 2012 - 2025 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -43,10 +43,8 @@ extern "C" {
     The module is tagged as such in the module's header (meaning it can be
     loaded unconditionally regardless of how the Qore library was initialized).
 
-    The underlying functionality is provided by Linenoise library, Steve Bennett's fork
-    https://github.com/msteveb/linenoise
-    of the original version
-    https://github.com/antirez/linenoise
+    The underlying functionality is provided by Linenoise-NG library: https://github.com/arangodb/linenoise-ng
+    of the original version https://github.com/antirez/linenoise
 
     @section basic_usage Basic Usage
 
@@ -156,6 +154,9 @@ Linenoise::set_callback(\my_callback());
     </table>
 
     @section linenoisereleasenotes linenoise Module Release Notes
+
+    @subsection linenoise_1_1_0 linenoise Module Version 1.1.0
+    - updated to use the Linenoise-NG library to support UTF-8 characters
 
     @subsection linenoise_1_0_1 linenoise Module Version 1.0.1
     - updated to build with \c qpp from %Qore 1.12.4+
@@ -355,17 +356,19 @@ nothing history_free() {
     @see @ref history_handling
  */
 list<auto> history() {
+    ReferenceHolder<QoreListNode> ret(new QoreListNode(autoTypeInfo), xsink);
+
     AutoLocker al(lock);
-
-    int len;
-    char** data = linenoiseHistory(&len);
-    QoreListNode*ret = new QoreListNode(autoTypeInfo);
-
-    for (int i = 0; i < len; ++i) {
-        ret->push(new QoreStringNode(data[i]), xsink);
+    int index = 0;
+    while (true) {
+        char* data = linenoiseHistoryLine(index++);
+        if (!data) {
+            break;
+        }
+        ret->push(new QoreStringNode(data, QCS_UTF8), xsink);
     }
 
-    return ret;
+    return ret.release();
 }
 
 //! Get terminal width in characters.
@@ -373,9 +376,11 @@ list<auto> history() {
     @return int actual width of terminal window in characters
  */
 int columns() {
-    AutoLocker al(lock);
-
-    return linenoiseColumns();
+    QoreString str;
+    if (SystemEnvironment::get("COL", str)) {
+        return -1;
+    }
+    return str.toBigInt();
 }
 
 //! Set auto-completion callback function
@@ -392,8 +397,9 @@ int columns() {
 nothing set_callback(code callback) {
     AutoLocker al(lock);
 
-    if (callbackNode)
+    if (callbackNode) {
         callbackNode->deref(xsink);
+    }
     callbackNode = callback->refRefSelf();
 }
 ///@}
