@@ -608,6 +608,24 @@ static bool isControlChar(char32_t testChar) {
          (testChar >= 0x7F && testChar <= 0x9F);  // DEL and C1 controls
 }
 
+/**
+ * Check if a char32_t character is one of the specified ASCII characters
+ * Unlike strchr, this properly handles char32_t and won't match Unicode
+ * characters whose low byte happens to match
+ * @param chars  ASCII characters to check against (null-terminated)
+ * @param c      character to test
+ * @return       true if c is one of the ASCII characters in chars
+ */
+static bool isCharInString(const char* chars, char32_t c) {
+  // Only match ASCII characters (< 128)
+  if (c >= 128) return false;
+  while (*chars) {
+    if (static_cast<char32_t>(*chars) == c) return true;
+    ++chars;
+  }
+  return false;
+}
+
 struct PromptBase {            // a convenience struct for grouping prompt info
   Utf32String promptText;      // our copy of the prompt text, edited
   char* promptCharWidths;      // character widths from mk_wcwidth()
@@ -1213,7 +1231,7 @@ void InputBuffer::refreshLine(PromptBase& pi) {
     /* this scans for a brace matching buf32[pos] to highlight */
     unsigned char part1, part2;
     int scanDirection = 0;
-    if (strchr("}])", buf32[pos])) {
+    if (isCharInString("}])", buf32[pos])) {
       scanDirection = -1; /* backwards */
       if (buf32[pos] == '}') {
         part1 = '}'; part2 = '{';
@@ -1223,7 +1241,7 @@ void InputBuffer::refreshLine(PromptBase& pi) {
         part1 = ')'; part2 = '(';
       }
     }
-    else if (strchr("{[(", buf32[pos])) {
+    else if (isCharInString("{[(", buf32[pos])) {
       scanDirection = 1; /* forwards */
       if (buf32[pos] == '{') {
         //part1 = '{'; part2 = '}';
@@ -1242,25 +1260,19 @@ void InputBuffer::refreshLine(PromptBase& pi) {
       int unmatchedOther = 0;
       for (int i = pos + scanDirection; i >= 0 && i < len; i += scanDirection) {
         /* TODO: the right thing when inside a string */
-        if (strchr("}])", buf32[i])) {
+        if (isCharInString("}])", buf32[i])) {
           if (buf32[i] == part1) {
             --unmatched;
           } else {
             --unmatchedOther;
           }
-        } else if (strchr("{[(", buf32[i])) {
+        } else if (isCharInString("{[(", buf32[i])) {
           if (buf32[i] == part2) {
             ++unmatched;
           } else {
             ++unmatchedOther;
           }
         }
-/*
-        if (strchr("}])", buf32[i]))
-          --unmatched;
-        else if (strchr("{[(", buf32[i]))
-          ++unmatched;
-*/
         if (unmatched == 0) {
           highlight = i;
           indicateError = (unmatchedOther != 0);
@@ -1958,7 +1970,7 @@ int InputBuffer::completeLine(PromptBase& pi) {
   // not at end-of-line.
   int startIndex = pos;
   while (--startIndex >= 0) {
-    if (strchr(breakChars, buf32[startIndex])) {
+    if (isCharInString(breakChars, buf32[startIndex])) {
       break;
     }
   }
@@ -3458,4 +3470,12 @@ int linenoiseInstallWindowChangeHandler(void) {
 
 int linenoiseKeyType(void) {
   return keyType;
+}
+
+int linenoiseColumns(void) {
+  return getScreenColumns();
+}
+
+int linenoiseRows(void) {
+  return getScreenRows();
 }
