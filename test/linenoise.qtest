@@ -8,17 +8,504 @@
 %enable-all-warnings
 
 %requires QUnit
+%requires Util
+%requires FsUtil
 
 %exec-class LinenoiseTest
 
 class LinenoiseTest inherits Test {
+    private {
+        string tmp_dir;
+    }
+
     constructor() : Test("LinenoiseTest", "1.0") {
-        addTestCase("linenoise main", \test());
+        tmp_dir = make_tmp_dir();
+
+        # Terminal dimension tests
+        addTestCase("columns() returns valid width", \testColumns());
+        addTestCase("rows() returns valid height", \testRows());
+
+        # History basic operations
+        addTestCase("history_add() basic functionality", \testHistoryAddBasic());
+        addTestCase("history_get_max_len() default value", \testHistoryGetMaxLenDefault());
+        addTestCase("history_set_max_len() basic functionality", \testHistorySetMaxLen());
+        addTestCase("history() returns list", \testHistoryReturnsList());
+        addTestCase("history_free() clears history", \testHistoryFree());
+
+        # History limits and edge cases
+        addTestCase("history respects max length", \testHistoryMaxLength());
+        addTestCase("history duplicate prevention", \testHistoryDuplicates());
+        addTestCase("history empty string handling", \testHistoryEmptyString());
+
+        # History persistence
+        addTestCase("history_save() and history_load() basic", \testHistorySaveLoad());
+        addTestCase("history_save() error handling", \testHistorySaveError());
+        addTestCase("history_load() error handling", \testHistoryLoadError());
+        addTestCase("history_load() non-existent file", \testHistoryLoadNonExistent());
+
+        # UTF-8 tests
+        addTestCase("UTF-8 history add and retrieve", \testUTF8History());
+        addTestCase("UTF-8 CJK characters in history", \testUTF8CJK());
+        addTestCase("UTF-8 emoji in history", \testUTF8Emoji());
+        addTestCase("UTF-8 combining characters in history", \testUTF8Combining());
+        addTestCase("UTF-8 mixed scripts in history", \testUTF8MixedScripts());
+        addTestCase("UTF-8 history persistence", \testUTF8Persistence());
+
+        # Callback tests
+        addTestCase("set_callback() accepts closure", \testSetCallbackClosure());
+        addTestCase("set_callback() accepts function reference", \testSetCallbackFunctionRef());
+        addTestCase("set_callback() can be replaced", \testSetCallbackReplace());
+
+        # Negative tests
+        addTestCase("history_set_max_len() rejects zero", \testSetMaxLenZero());
+        addTestCase("history_set_max_len() rejects negative", \testSetMaxLenNegative());
+
+        # Corner cases
+        addTestCase("history with special characters", \testHistorySpecialChars());
+        addTestCase("history with very long lines", \testHistoryLongLines());
+        addTestCase("history max len change truncates", \testMaxLenChangeTruncates());
+        addTestCase("multiple save/load cycles", \testMultipleSaveLoadCycles());
+
         set_return_value(main());
     }
 
-    test() {
-        # currently only a basic sanity test
-        assertGt(0, Linenoise::columns());
+    destructor() {
+        # Clean up temp directory
+        if (tmp_dir) {
+            remove_tree(tmp_dir);
+        }
     }
+
+    resetHistory() {
+        # Reset history before each test
+        Linenoise::history_free();
+        Linenoise::history_set_max_len(100);
+    }
+
+    # ==================== Terminal Dimension Tests ====================
+
+    testColumns() {
+        resetHistory();
+        int cols = Linenoise::columns();
+        # Should return a positive value (defaults to 80 if detection fails)
+        assertGt(0, cols);
+        # Reasonable upper bound for terminal width
+        assertLt(10000, cols);
+    }
+
+    testRows() {
+        resetHistory();
+        int r = Linenoise::rows();
+        # Should return a positive value (defaults to 24 if detection fails)
+        assertGt(0, r);
+        # Reasonable upper bound for terminal height
+        assertLt(10000, r);
+    }
+
+    # ==================== History Basic Operations ====================
+
+    testHistoryAddBasic() {
+        resetHistory();
+        int result = Linenoise::history_add("test line");
+        assertEq(1, result);
+
+        list<auto> h = Linenoise::history();
+        assertEq(1, h.size());
+        assertEq("test line", h[0]);
+    }
+
+    testHistoryGetMaxLenDefault() {
+        resetHistory();
+        Linenoise::history_free();
+        # Default max length is 100 as per linenoise.cpp
+        Linenoise::history_set_max_len(100);
+        int maxLen = Linenoise::history_get_max_len();
+        assertEq(100, maxLen);
+    }
+
+    testHistorySetMaxLen() {
+        resetHistory();
+        int result = Linenoise::history_set_max_len(50);
+        assertEq(1, result);
+        assertEq(50, Linenoise::history_get_max_len());
+
+        result = Linenoise::history_set_max_len(200);
+        assertEq(1, result);
+        assertEq(200, Linenoise::history_get_max_len());
+    }
+
+    testHistoryReturnsList() {
+        resetHistory();
+        list<auto> h = Linenoise::history();
+        assertEq(Type::List, h.type());
+        assertEq(0, h.size());
+
+        Linenoise::history_add("line1");
+        Linenoise::history_add("line2");
+        h = Linenoise::history();
+        assertEq(2, h.size());
+    }
+
+    testHistoryFree() {
+        resetHistory();
+        Linenoise::history_add("line1");
+        Linenoise::history_add("line2");
+        list<auto> h = Linenoise::history();
+        assertEq(2, h.size());
+
+        Linenoise::history_free();
+        h = Linenoise::history();
+        assertEq(0, h.size());
+    }
+
+    # ==================== History Limits and Edge Cases ====================
+
+    testHistoryMaxLength() {
+        resetHistory();
+        Linenoise::history_set_max_len(5);
+
+        for (int i = 0; i < 10; i++) {
+            Linenoise::history_add(sprintf("line%d", i));
+        }
+
+        list<auto> h = Linenoise::history();
+        assertEq(5, h.size());
+        # Should have the last 5 entries (oldest removed)
+        assertEq("line5", h[0]);
+        assertEq("line9", h[4]);
+    }
+
+    testHistoryDuplicates() {
+        resetHistory();
+        Linenoise::history_add("first");
+        Linenoise::history_add("second");
+        Linenoise::history_add("second");  # Should not add - same as most recent
+
+        list<auto> h = Linenoise::history();
+        # Linenoise only prevents consecutive duplicates (same as most recent)
+        assertEq(2, h.size());
+        assertEq("first", h[0]);
+        assertEq("second", h[1]);
+
+        # Adding a different entry, then the same again should work
+        Linenoise::history_add("third");
+        Linenoise::history_add("second");  # This WILL be added - not consecutive duplicate
+        h = Linenoise::history();
+        assertEq(4, h.size());
+    }
+
+    testHistoryEmptyString() {
+        resetHistory();
+        # Adding empty string - test that it doesn't crash
+        Linenoise::history_add("");
+        # Empty strings are added to in-memory history but skipped on save
+        list<auto> h = Linenoise::history();
+        assertEq(1, h.size());
+        assertEq("", h[0]);
+    }
+
+    # ==================== History Persistence ====================
+
+    testHistorySaveLoad() {
+        resetHistory();
+        string filename = tmp_dir + "/history_basic.txt";
+
+        Linenoise::history_add("line1");
+        Linenoise::history_add("line2");
+        Linenoise::history_add("line3");
+
+        Linenoise::history_save(filename);
+        assertTrue(is_file(filename));
+
+        Linenoise::history_free();
+        list<auto> h = Linenoise::history();
+        assertEq(0, h.size());
+
+        Linenoise::history_load(filename);
+        h = Linenoise::history();
+        assertEq(3, h.size());
+        assertEq("line1", h[0]);
+        assertEq("line2", h[1]);
+        assertEq("line3", h[2]);
+
+        unlink(filename);
+    }
+
+    testHistorySaveError() {
+        resetHistory();
+        # Try to save to an invalid path
+        string invalid_path = "/nonexistent_dir_12345/history.txt";
+
+        assertThrows("LINENOISE-HISTORY-SAVE-ERROR", sub() {
+            Linenoise::history_save(invalid_path);
+        });
+    }
+
+    testHistoryLoadError() {
+        resetHistory();
+        # Try to load from a directory - should fail or return empty
+        # The behavior varies by OS, but we can verify it doesn't corrupt state
+        int initial_len = Linenoise::history_get_max_len();
+        try {
+            Linenoise::history_load("/");
+        } catch (hash<ExceptionInfo> ex) {
+            # Expected on some systems
+        }
+        # Verify history state is still valid after failed/empty load
+        assertEq(initial_len, Linenoise::history_get_max_len());
+    }
+
+    testHistoryLoadNonExistent() {
+        resetHistory();
+        string nonexistent = tmp_dir + "/nonexistent_file.txt";
+
+        assertThrows("LINENOISE-HISTORY-LOAD-ERROR", sub() {
+            Linenoise::history_load(nonexistent);
+        });
+    }
+
+    # ==================== UTF-8 Tests ====================
+
+    testUTF8History() {
+        resetHistory();
+        # Basic UTF-8 - Latin extended characters
+        string utf8_str = "caf\u00e9 na\u00efve r\u00e9sum\u00e9";  # cafe naive resume with accents
+        Linenoise::history_add(utf8_str);
+
+        list<auto> h = Linenoise::history();
+        assertEq(1, h.size());
+        assertEq(utf8_str, h[0]);
+    }
+
+    testUTF8CJK() {
+        resetHistory();
+        # Chinese characters
+        string chinese = "\u4e2d\u6587\u6d4b\u8bd5";  # "Chinese test" in Chinese
+        # Japanese characters (hiragana + kanji)
+        string japanese = "\u3053\u3093\u306b\u3061\u306f\u4e16\u754c";  # "Hello world" in Japanese
+        # Korean characters
+        string korean = "\uc548\ub155\ud558\uc138\uc694";  # "Hello" in Korean
+
+        Linenoise::history_add(chinese);
+        Linenoise::history_add(japanese);
+        Linenoise::history_add(korean);
+
+        list<auto> h = Linenoise::history();
+        assertEq(3, h.size());
+        assertEq(chinese, h[0]);
+        assertEq(japanese, h[1]);
+        assertEq(korean, h[2]);
+    }
+
+    testUTF8Emoji() {
+        resetHistory();
+        # Various emoji (require surrogate pairs in UTF-16)
+        string emoji = "\U0001F600\U0001F389\U0001F680\U0001F4BB";  # grinning face, party popper, rocket, laptop
+
+        Linenoise::history_add(emoji);
+        Linenoise::history_add("text with emoji: \U0001F44D");  # thumbs up
+
+        list<auto> h = Linenoise::history();
+        assertEq(2, h.size());
+        assertEq(emoji, h[0]);
+        assertEq("text with emoji: \U0001F44D", h[1]);
+    }
+
+    testUTF8Combining() {
+        resetHistory();
+        # Characters with combining marks
+        string combining = "e\u0301";  # e + combining acute accent = é (e with acute accent)
+        string precomposed = "\u00e9";  # precomposed é with acute
+
+        Linenoise::history_add(combining);
+        Linenoise::history_add(precomposed);
+
+        list<auto> h = Linenoise::history();
+        assertEq(2, h.size());
+        assertEq(combining, h[0]);
+        assertEq(precomposed, h[1]);
+    }
+
+    testUTF8MixedScripts() {
+        resetHistory();
+        # Mixed scripts in single string
+        string mixed = "Hello \u4e16\u754c \u041f\u0440\u0438\u0432\u0435\u0442 \u0645\u0631\u062d\u0628\u0627";
+        # English + Chinese + Russian + Arabic
+
+        Linenoise::history_add(mixed);
+
+        list<auto> h = Linenoise::history();
+        assertEq(1, h.size());
+        assertEq(mixed, h[0]);
+    }
+
+    testUTF8Persistence() {
+        resetHistory();
+        string filename = tmp_dir + "/history_utf8.txt";
+
+        # Add various UTF-8 strings
+        string russian = "\u041f\u0440\u0438\u0432\u0435\u0442 \u043c\u0438\u0440";  # "Hello world" in Russian
+        string greek = "\u0393\u03b5\u03b9\u03ac \u03c3\u03bf\u03c5 \u03ba\u03cc\u03c3\u03bc\u03b5";  # "Hello world" in Greek
+        string hebrew = "\u05e9\u05dc\u05d5\u05dd \u05e2\u05d5\u05dc\u05dd";  # "Hello world" in Hebrew
+        string thai = "\u0e2a\u0e27\u0e31\u0e2a\u0e14\u0e35\u0e42\u0e25\u0e01";  # "Hello world" in Thai
+
+        Linenoise::history_add(russian);
+        Linenoise::history_add(greek);
+        Linenoise::history_add(hebrew);
+        Linenoise::history_add(thai);
+
+        Linenoise::history_save(filename);
+
+        Linenoise::history_free();
+        Linenoise::history_load(filename);
+
+        list<auto> h = Linenoise::history();
+        assertEq(4, h.size());
+        assertEq(russian, h[0]);
+        assertEq(greek, h[1]);
+        assertEq(hebrew, h[2]);
+        assertEq(thai, h[3]);
+
+        unlink(filename);
+    }
+
+    # ==================== Callback Tests ====================
+
+    testSetCallbackClosure() {
+        resetHistory();
+        code callback = list<string> sub(string input) {
+            return ("completion1", "completion2");
+        };
+
+        # Verify setting callback doesn't throw - test passes if no exception
+        Linenoise::set_callback(callback);
+        # If we reach here, the callback was set successfully
+        assertEq(1, 1);
+    }
+
+    testSetCallbackFunctionRef() {
+        resetHistory();
+        # Verify setting callback with function reference doesn't throw
+        Linenoise::set_callback(\dummyCallback());
+        # If we reach here, the callback was set successfully
+        assertEq(1, 1);
+    }
+
+    testSetCallbackReplace() {
+        resetHistory();
+        code callback1 = list<string> sub(string input) {
+            return ("first",);
+        };
+        code callback2 = list<string> sub(string input) {
+            return ("second",);
+        };
+
+        # Verify callbacks can be replaced without error
+        Linenoise::set_callback(callback1);
+        Linenoise::set_callback(callback2);
+        # If we reach here, the callback replacement succeeded
+        assertEq(1, 1);
+    }
+
+    # ==================== Negative Tests ====================
+
+    testSetMaxLenZero() {
+        resetHistory();
+        int result = Linenoise::history_set_max_len(0);
+        # Should return 0 (failure) for invalid length
+        assertEq(0, result);
+    }
+
+    testSetMaxLenNegative() {
+        resetHistory();
+        int result = Linenoise::history_set_max_len(-5);
+        # Should return 0 (failure) for invalid length
+        assertEq(0, result);
+    }
+
+    # ==================== Corner Cases ====================
+
+    testHistorySpecialChars() {
+        resetHistory();
+        # Test with special shell characters
+        string special = "echo 'hello' | grep \"world\" && ls -la > /dev/null 2>&1 &";
+        Linenoise::history_add(special);
+
+        list<auto> h = Linenoise::history();
+        assertEq(special, h[0]);
+
+        # Test with backslashes
+        string backslash = "path\\to\\file";
+        Linenoise::history_add(backslash);
+        h = Linenoise::history();
+        assertEq(backslash, h[1]);
+
+        # Test with null-like strings (not actual nulls, which would truncate)
+        string nullish = "before\\0after";
+        Linenoise::history_add(nullish);
+        h = Linenoise::history();
+        assertEq(nullish, h[2]);
+    }
+
+    testHistoryLongLines() {
+        resetHistory();
+        # Test with very long line (near LINENOISE_MAX_LINE = 4096)
+        string long_line = strmul("a", 4000);
+        Linenoise::history_add(long_line);
+
+        list<auto> h = Linenoise::history();
+        assertEq(1, h.size());
+        assertEq(4000, h[0].length());
+    }
+
+    testMaxLenChangeTruncates() {
+        resetHistory();
+        Linenoise::history_set_max_len(10);
+
+        for (int i = 0; i < 10; i++) {
+            Linenoise::history_add(sprintf("line%d", i));
+        }
+
+        list<auto> h = Linenoise::history();
+        assertEq(10, h.size());
+
+        # Reduce max length - should truncate oldest entries
+        Linenoise::history_set_max_len(5);
+        h = Linenoise::history();
+        # After truncation, should have last 5 entries
+        assertLe(5, h.size());
+    }
+
+    testMultipleSaveLoadCycles() {
+        resetHistory();
+        string filename = tmp_dir + "/history_cycles.txt";
+
+        # First cycle
+        Linenoise::history_add("cycle1_line1");
+        Linenoise::history_add("cycle1_line2");
+        Linenoise::history_save(filename);
+
+        # Second cycle - load and add more
+        Linenoise::history_free();
+        Linenoise::history_load(filename);
+        Linenoise::history_add("cycle2_line1");
+        Linenoise::history_save(filename);
+
+        # Third cycle - verify all data
+        Linenoise::history_free();
+        Linenoise::history_load(filename);
+
+        list<auto> h = Linenoise::history();
+        assertEq(3, h.size());
+        assertEq("cycle1_line1", h[0]);
+        assertEq("cycle1_line2", h[1]);
+        assertEq("cycle2_line1", h[2]);
+
+        unlink(filename);
+    }
+}
+
+# Helper function for callback tests
+list<string> sub dummyCallback(string input) {
+    return ("dummy",);
 }

@@ -36,9 +36,10 @@
 #ifndef __LINENOISE_H
 #define __LINENOISE_H
 
-#define LINENOISE_VERSION "1.0.0"
+#define LINENOISE_VERSION "1.1.1"
 #define LINENOISE_VERSION_MAJOR 1
 #define LINENOISE_VERSION_MINOR 1
+#define LINENOISE_VERSION_PATCH 1
 
 #ifdef __cplusplus
 extern "C" {
@@ -66,6 +67,10 @@ void linenoisePrintKeyCodes(void);
 int linenoiseInstallWindowChangeHandler(void);
 /* returns type of key pressed: 1 = CTRL-C, 2 = CTRL-D, 0 = other */
 int linenoiseKeyType(void);
+/* returns the terminal width in columns */
+int linenoiseColumns(void);
+/* returns the terminal height in rows */
+int linenoiseRows(void);
 
 #ifdef __cplusplus
 }

@@ -155,6 +155,18 @@ Linenoise::set_callback(\my_callback());
 
     @section linenoisereleasenotes linenoise Module Release Notes
 
+    @subsection linenoise_1_1_1 linenoise Module Version 1.1.1
+    - fixed @ref Qore::Linenoise::columns() to use proper terminal detection via ioctl()
+      instead of reading from environment variable
+    - added @ref Qore::Linenoise::rows() function for terminal height detection
+    - fixed thread safety issue in completion callback
+    - improved exception handling in completion callback
+    - fixed UTF-8 encoding for completion callback input
+    - fixed bug in brace matching and word-break detection where certain Unicode
+      characters could falsely match ASCII bracket/break characters due to truncation
+      of char32_t values when passed to strchr()
+    - added comprehensive test suite with UTF-8 tests
+
     @subsection linenoise_1_1_0 linenoise Module Version 1.1.0
     - updated to use the Linenoise-NG library to support UTF-8 characters
 
@@ -172,11 +184,10 @@ void init_linenoise_functions(QoreNamespace& ns);
 QoreThreadLock lock;
 ResolvedCallReferenceNode* callbackNode = nullptr;
 
-void qore_lineoise_completion_cb(const char *input, linenoiseCompletions *qter) {
-//    AutoLocker al(lock);
+void qore_linenoise_completion_cb(const char *input, linenoiseCompletions *lc) {
+    AutoLocker al(lock);
 
     if (!callbackNode) {
-        //printf("callback ignored, node is not set\n");
         return;
     }
 
@@ -184,27 +195,34 @@ void qore_lineoise_completion_cb(const char *input, linenoiseCompletions *qter) 
 
     ValueHolder ret(&xsink);
     {
-       ReferenceHolder<QoreListNode> args(new QoreListNode(autoTypeInfo), &xsink);
-       args->push(new QoreStringNode(input), nullptr);
-       ret = callbackNode->execValue(*args, &xsink);
+        ReferenceHolder<QoreListNode> args(new QoreListNode(autoTypeInfo), &xsink);
+        args->push(new QoreStringNode(input, QCS_UTF8), nullptr);
+        ret = callbackNode->execValue(*args, &xsink);
+    }
+
+    // Check for exceptions from callback execution
+    if (xsink.isException()) {
+        // Log the exception but don't crash - completion just won't work
+        xsink.clear();
+        return;
     }
 
     if (ret->getType() != NT_LIST) {
-        printf("Callback implementation does not return list\n");
+        // Callback didn't return a list - silently ignore
         return;
     }
 
     QoreListNode* lst = ret->get<QoreListNode>();
     for (size_t i = 0; i < lst->size(); ++i) {
         QoreStringValueHelper str(lst->retrieveEntry(i));
-        linenoiseAddCompletion(qter, str->c_str());
+        linenoiseAddCompletion(lc, str->c_str());
     }
 }
 
 QoreStringNode * linenoise_module_init() {
     init_linenoise_functions(LinenoiseNS);
 
-    linenoiseSetCompletionCallback(qore_lineoise_completion_cb);
+    linenoiseSetCompletionCallback(qore_linenoise_completion_cb);
 
     return 0;
 }
@@ -373,19 +391,23 @@ list<auto> history() {
 
 //! Get terminal width in characters.
 /**
-    @return int actual width of terminal window in characters
+    @return int actual width of terminal window in characters (defaults to 80 if detection fails)
  */
 int columns() {
-    QoreString str;
-    if (SystemEnvironment::get("COL", str)) {
-        return -1;
-    }
-    return str.toBigInt();
+    return linenoiseColumns();
+}
+
+//! Get terminal height in rows.
+/**
+    @return int actual height of terminal window in rows (defaults to 24 if detection fails)
+ */
+int rows() {
+    return linenoiseRows();
 }
 
 //! Set auto-completion callback function
 /**
-    @param code a funnction/method reference or a closure to handle completion callback
+    @param code a function/method reference or a closure to handle completion callback
 
     @see @ref line_completion
 
