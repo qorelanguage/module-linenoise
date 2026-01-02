@@ -181,7 +181,7 @@ static QoreNamespace LinenoiseNS("Linenoise");
 
 void init_linenoise_functions(QoreNamespace& ns);
 
-QoreThreadLock lock;
+QoreRecursiveThreadLock lock;
 ResolvedCallReferenceNode* callbackNode = nullptr;
 
 void qore_linenoise_completion_cb(const char *input, linenoiseCompletions *lc) {
