@@ -895,6 +895,7 @@ class InputBuffer {
     len = static_cast<int>(ucharCount);
     pos = static_cast<int>(ucharCount);
   }
+  bool tryAutoDedent(char32_t c);
   int getInputLine(PromptBase& pi);
   int length(void) const { return len; }
 };
@@ -1945,7 +1946,7 @@ static int cleanupCtrl(int c) {
 }
 
 // break characters that may precede items to be completed
-static const char breakChars[] = " =+-/\\*?\"'`&<>;|@{([])}";
+static const char breakChars[] = " =+-/\\*?\"'`&<>:;|@{([])}";
 
 // maximum number of completions to display without asking
 static const size_t completionCountCutoff = 100;
@@ -1964,10 +1965,8 @@ int InputBuffer::completeLine(PromptBase& pi) {
   linenoiseCompletions lc;
   char32_t c = 0;
 
-  // completionCallback() expects a parsable entity, so find the previous break
-  // character and
-  // extract a copy to parse.  we also handle the case where tab is hit while
-  // not at end-of-line.
+  // Find the previous break character to determine the word being completed.
+  // We also handle the case where tab is hit while not at end-of-line.
   int startIndex = pos;
   while (--startIndex >= 0) {
     if (isCharInString(breakChars, buf32[startIndex])) {
@@ -1976,11 +1975,15 @@ int InputBuffer::completeLine(PromptBase& pi) {
   }
   ++startIndex;
   int itemLength = pos - startIndex;
-  Utf32String unicodeCopy(&buf32[startIndex], itemLength);
-  Utf8String parseItem(unicodeCopy);
+
+  // Pass the full line up to cursor position to the callback for context
+  // detection (e.g., "new " before the current word). The callback returns
+  // word-level completions (replacements for the text from startIndex to pos).
+  Utf32String fullLineCopy(buf32, pos);
+  Utf8String fullLine(fullLineCopy);
 
   // get a list of completions
-  completionCallback(parseItem.get(), &lc);
+  completionCallback(fullLine.get(), &lc);
 
   // if no completions, we are done
   if (lc.completionStrings.size() == 0) {
@@ -3069,6 +3072,8 @@ int InputBuffer::getInputLine(PromptBase& pi) {
           beep();
           break;
         }
+        {
+        bool didDedent = tryAutoDedent(c);  // remove one indent level if applicable
         if (len < buflen) {
           if (isControlChar(c)) {  // don't insert control characters
             beep();
@@ -3079,16 +3084,21 @@ int InputBuffer::getInputLine(PromptBase& pi) {
             ++pos;
             ++len;
             buf32[len] = '\0';
-            int inputLen = calculateColumnPosition(buf32, len);
-            if (pi.promptIndentation + inputLen < pi.promptScreenColumns) {
-              if (inputLen > pi.promptPreviousInputLen)
-                pi.promptPreviousInputLen = inputLen;
-              /* Avoid a full update of the line in the
-               * trivial case. */
-              if (write32(1, reinterpret_cast<char32_t*>(&c), 1) == -1)
-                return -1;
-            } else {
+            if (didDedent) {
+              // dedent changed the buffer; must redraw entire line
               refreshLine(pi);
+            } else {
+              int inputLen = calculateColumnPosition(buf32, len);
+              if (pi.promptIndentation + inputLen < pi.promptScreenColumns) {
+                if (inputLen > pi.promptPreviousInputLen)
+                  pi.promptPreviousInputLen = inputLen;
+                /* Avoid a full update of the line in the
+                 * trivial case. */
+                if (write32(1, reinterpret_cast<char32_t*>(&c), 1) == -1)
+                  return -1;
+              } else {
+                refreshLine(pi);
+              }
             }
           } else {  // not at end of buffer, have to move characters to our
                     // right
@@ -3103,6 +3113,7 @@ int InputBuffer::getInputLine(PromptBase& pi) {
         } else {
           beep();  // buffer is full, beep on new characters
         }
+        }  // end of dedent scope
         break;
     }
   }
@@ -3111,6 +3122,48 @@ int InputBuffer::getInputLine(PromptBase& pi) {
 
 static string preloadedBufferContents;  // used with linenoisePreloadBuffer
 static string preloadErrorMessage;
+
+static string autoDedentIndentStr;   // used with linenoiseSetAutoDedent
+static char32_t autoDedentChar = 0;  // character that triggers auto-dedent (e.g. '}')
+
+bool InputBuffer::tryAutoDedent(char32_t c) {
+  if (autoDedentChar == 0 || c != autoDedentChar || autoDedentIndentStr.empty()) {
+    return false;
+  }
+  // Check: buffer must contain only whitespace up to current position
+  for (int i = 0; i < pos; i++) {
+    if (buf32[i] != ' ' && buf32[i] != '\t') {
+      return false;
+    }
+  }
+  // Check: nothing after cursor (or only whitespace)
+  for (int i = pos; i < len; i++) {
+    if (buf32[i] != ' ' && buf32[i] != '\t') {
+      return false;
+    }
+  }
+  // Check buffer starts with at least one indent string
+  size_t indentLen = autoDedentIndentStr.length();
+  if (static_cast<size_t>(len) < indentLen) {
+    return false;
+  }
+  for (size_t i = 0; i < indentLen; i++) {
+    if (buf32[i] != static_cast<char32_t>(autoDedentIndentStr[i])) {
+      return false;
+    }
+  }
+  // Remove one indent from start of buffer
+  int removeCount = static_cast<int>(indentLen);
+  memmove(buf32, buf32 + removeCount, sizeof(char32_t) * (len - removeCount));
+  memmove(charWidths, charWidths + removeCount, sizeof(char) * (len - removeCount));
+  len -= removeCount;
+  pos -= removeCount;
+  if (pos < 0) {
+    pos = 0;
+  }
+  buf32[len] = '\0';
+  return true;
+}
 
 /**
  * linenoisePreloadBuffer provides text to be inserted into the command buffer
@@ -3174,6 +3227,25 @@ void linenoisePreloadBuffer(const char* preloadText) {
              (LINENOISE_MAX_LINE - 1));
     preloadErrorMessage += buf;
   }
+}
+
+/**
+ * linenoiseSetAutoDedent configures auto-dedent behavior
+ *
+ * When the dedent character is typed and the edit buffer contains only
+ * whitespace (i.e., only auto-indentation), one indent level is removed
+ * before the character is inserted.
+ *
+ * @param indentStr the indentation string (e.g. "    " for 4 spaces)
+ * @param dedentChar the character that triggers dedent (e.g. '}')
+ */
+void linenoiseSetAutoDedent(const char* indentStr, char32_t dedentChar) {
+  if (indentStr) {
+    autoDedentIndentStr = indentStr;
+  } else {
+    autoDedentIndentStr.clear();
+  }
+  autoDedentChar = dedentChar;
 }
 
 /**

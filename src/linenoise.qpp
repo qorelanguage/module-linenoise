@@ -156,8 +156,14 @@ Linenoise::set_callback(\my_callback());
     @section linenoisereleasenotes linenoise Module Release Notes
 
     @subsection linenoise_1_2_0 linenoise Module Version 1.2.0
+    - added @ref Qore::Linenoise::set_auto_dedent() for automatic dedent when typing
+      closing characters (e.g., @c }) on indented lines
     - added @ref Qore::Linenoise::preload_buffer() function to pre-fill the edit buffer for
       the next @ref Qore::Linenoise::line() call, enabling auto-indentation in REPL environments
+    - added @c : to tab-completion break characters for namespace-qualified completions
+      (e.g., @c Namespace::Class)
+    - completion callback now receives the full line up to the cursor position for
+      context-aware completions
     - fixed memory leak in @ref Qore::Linenoise::history() where strings returned by
       \c linenoiseHistoryLine() were not freed
 
@@ -461,5 +467,34 @@ nothing preload_buffer(string text) {
     AutoLocker al(lock);
 
     linenoisePreloadBuffer(text->c_str());
+}
+
+//! Configure auto-dedent behavior for closing characters
+/**
+    When the dedent character is typed and the edit buffer contains only
+    whitespace (i.e., only auto-indentation), one indent level is removed
+    before the character is inserted. This provides a seamless coding
+    experience for block-structured languages.
+
+    @param indent_str The indentation string (e.g., "    " for 4 spaces)
+    @param dedent_char The character that triggers dedent (e.g., "}")
+
+    @par Example
+    @code{.py}
+# Configure auto-dedent for Qore's brace-based blocks
+Linenoise::set_auto_dedent("    ", "}");
+# Now when user types "}" on an indented line, one level is removed automatically
+    @endcode
+
+    @since linenoise 1.2.0
+ */
+nothing set_auto_dedent(string indent_str, string dedent_char) {
+    AutoLocker al(lock);
+
+    char32_t dc = 0;
+    if (dedent_char->strlen() > 0) {
+        dc = static_cast<char32_t>(dedent_char->getUnicodePointFromUTF8(0));
+    }
+    linenoiseSetAutoDedent(indent_str->c_str(), dc);
 }
 ///@}

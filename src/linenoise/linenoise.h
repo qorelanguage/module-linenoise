@@ -36,10 +36,10 @@
 #ifndef __LINENOISE_H
 #define __LINENOISE_H
 
-#define LINENOISE_VERSION "1.1.1"
+#define LINENOISE_VERSION "1.2.0"
 #define LINENOISE_VERSION_MAJOR 1
-#define LINENOISE_VERSION_MINOR 1
-#define LINENOISE_VERSION_PATCH 1
+#define LINENOISE_VERSION_MINOR 2
+#define LINENOISE_VERSION_PATCH 0
 
 #ifdef __cplusplus
 extern "C" {
@@ -62,6 +62,7 @@ int linenoiseHistoryLoad(const char* filename);
 void linenoiseHistoryFree(void);
 void linenoiseClearScreen(void);
 void linenoiseSetMultiLine(int ml);
+void linenoiseSetAutoDedent(const char* indentStr, char32_t dedentChar);
 void linenoisePrintKeyCodes(void);
 /* the following are extensions to the original linenoise API */
 int linenoiseInstallWindowChangeHandler(void);
