@@ -3,7 +3,7 @@
 
     Qore Programming Language
 
-    Copyright 2012 - 2025 Qore Technologies, s.r.o.
+    Copyright 2012 - 2026 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -154,6 +154,10 @@ Linenoise::set_callback(\my_callback());
     </table>
 
     @section linenoisereleasenotes linenoise Module Release Notes
+
+    @subsection linenoise_1_2_0 linenoise Module Version 1.2.0
+    - added @ref Qore::Linenoise::preload_buffer() function to pre-fill the edit buffer for
+      the next @ref Qore::Linenoise::line() call, enabling auto-indentation in REPL environments
 
     @subsection linenoise_1_1_1 linenoise Module Version 1.1.1
     - fixed @ref Qore::Linenoise::columns() to use proper terminal detection via ioctl()
@@ -387,6 +391,7 @@ list<auto> history() {
         if (!data) {
             break;
         }
+        ON_BLOCK_EXIT(free, data);
         ret->push(new QoreStringNode(data, QCS_UTF8), xsink);
     }
 
@@ -427,5 +432,32 @@ nothing set_callback(code callback) {
         callbackNode->deref(xsink);
     }
     callbackNode = callback->refRefSelf();
+}
+
+//! Pre-fill the edit buffer for the next line() call
+/**
+    Sets text that will appear as editable content when @ref Qore::Linenoise::line() is next called.
+    The user can edit or delete this pre-filled text using normal editing keys (backspace, etc.).
+
+    This is useful for auto-indentation in REPL environments: before reading a continuation line,
+    call this function with the appropriate whitespace to pre-fill the indent.
+
+    @param text The text to pre-fill in the edit buffer
+
+    @note The preloaded text is consumed by the next @ref Qore::Linenoise::line() call and does not
+    persist beyond that single call.
+
+    <b>Example:</b>
+    @code{.py}
+# Pre-fill 8 spaces of indentation
+Linenoise::preload_buffer("        ");
+*string line = Linenoise::line("...> ");
+# The user sees "...>         " with cursor after the spaces
+    @endcode
+ */
+nothing preload_buffer(string text) {
+    AutoLocker al(lock);
+
+    linenoisePreloadBuffer(text->c_str());
 }
 ///@}

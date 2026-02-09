@@ -53,6 +53,9 @@ class LinenoiseTest inherits Test {
         addTestCase("set_callback() accepts function reference", \testSetCallbackFunctionRef());
         addTestCase("set_callback() can be replaced", \testSetCallbackReplace());
 
+        # Preload buffer tests
+        addTestCase("preload_buffer() basic", \testPreloadBufferBasic());
+
         # Negative tests
         addTestCase("history_set_max_len() rejects zero", \testSetMaxLenZero());
         addTestCase("history_set_max_len() rejects negative", \testSetMaxLenNegative());
@@ -402,6 +405,39 @@ class LinenoiseTest inherits Test {
         Linenoise::set_callback(callback2);
         # If we reach here, the callback replacement succeeded
         assertEq(1, 1);
+    }
+
+    # ==================== Preload Buffer Tests ====================
+
+    testPreloadBufferBasic() {
+        resetHistory();
+        # Verify preload_buffer() accepts various strings without crashing
+        # (Interactive content can't be verified without a TTY)
+
+        # Empty string
+        Linenoise::preload_buffer("");
+        assertEq(1, 1, "preload_buffer with empty string should not crash");
+
+        # Whitespace (typical auto-indent use case)
+        Linenoise::preload_buffer("    ");
+        assertEq(1, 1, "preload_buffer with spaces should not crash");
+
+        # Multiple indent levels
+        Linenoise::preload_buffer("        ");
+        assertEq(1, 1, "preload_buffer with 8 spaces should not crash");
+
+        # Regular text
+        Linenoise::preload_buffer("some text");
+        assertEq(1, 1, "preload_buffer with regular text should not crash");
+
+        # Text with special characters
+        Linenoise::preload_buffer("hello\tworld");
+        assertEq(1, 1, "preload_buffer with tab should not crash");
+
+        # Calling preload_buffer multiple times (last one wins)
+        Linenoise::preload_buffer("first");
+        Linenoise::preload_buffer("second");
+        assertEq(1, 1, "Multiple preload_buffer calls should not crash");
     }
 
     # ==================== Negative Tests ====================
