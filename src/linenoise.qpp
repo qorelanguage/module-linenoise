@@ -158,6 +158,8 @@ Linenoise::set_callback(\my_callback());
     @subsection linenoise_1_2_0 linenoise Module Version 1.2.0
     - added @ref Qore::Linenoise::preload_buffer() function to pre-fill the edit buffer for
       the next @ref Qore::Linenoise::line() call, enabling auto-indentation in REPL environments
+    - fixed memory leak in @ref Qore::Linenoise::history() where strings returned by
+      \c linenoiseHistoryLine() were not freed
 
     @subsection linenoise_1_1_1 linenoise Module Version 1.1.1
     - fixed @ref Qore::Linenoise::columns() to use proper terminal detection via ioctl()

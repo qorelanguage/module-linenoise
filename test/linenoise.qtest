@@ -411,33 +411,27 @@ class LinenoiseTest inherits Test {
 
     testPreloadBufferBasic() {
         resetHistory();
-        # Verify preload_buffer() accepts various strings without crashing
-        # (Interactive content can't be verified without a TTY)
+        # Verify preload_buffer() returns NOTHING for various inputs
+        # (Interactive edit buffer content can't be verified without a TTY)
 
         # Empty string
-        Linenoise::preload_buffer("");
-        assertEq(1, 1, "preload_buffer with empty string should not crash");
+        assertNothing(Linenoise::preload_buffer(""));
 
         # Whitespace (typical auto-indent use case)
-        Linenoise::preload_buffer("    ");
-        assertEq(1, 1, "preload_buffer with spaces should not crash");
+        assertNothing(Linenoise::preload_buffer("    "));
 
         # Multiple indent levels
-        Linenoise::preload_buffer("        ");
-        assertEq(1, 1, "preload_buffer with 8 spaces should not crash");
+        assertNothing(Linenoise::preload_buffer("        "));
 
         # Regular text
-        Linenoise::preload_buffer("some text");
-        assertEq(1, 1, "preload_buffer with regular text should not crash");
+        assertNothing(Linenoise::preload_buffer("some text"));
 
         # Text with special characters
-        Linenoise::preload_buffer("hello\tworld");
-        assertEq(1, 1, "preload_buffer with tab should not crash");
+        assertNothing(Linenoise::preload_buffer("hello\tworld"));
 
         # Calling preload_buffer multiple times (last one wins)
-        Linenoise::preload_buffer("first");
-        Linenoise::preload_buffer("second");
-        assertEq(1, 1, "Multiple preload_buffer calls should not crash");
+        assertNothing(Linenoise::preload_buffer("first"));
+        assertNothing(Linenoise::preload_buffer("second"));
     }
 
     # ==================== Negative Tests ====================
