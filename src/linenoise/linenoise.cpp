@@ -3072,8 +3072,7 @@ int InputBuffer::getInputLine(PromptBase& pi) {
           beep();
           break;
         }
-        {
-        bool didDedent = tryAutoDedent(c);  // remove one indent level if applicable
+        bool didDedent = tryAutoDedent(c);
         if (len < buflen) {
           if (isControlChar(c)) {  // don't insert control characters
             beep();
@@ -3113,7 +3112,6 @@ int InputBuffer::getInputLine(PromptBase& pi) {
         } else {
           beep();  // buffer is full, beep on new characters
         }
-        }  // end of dedent scope
         break;
     }
   }
@@ -3123,8 +3121,11 @@ int InputBuffer::getInputLine(PromptBase& pi) {
 static string preloadedBufferContents;  // used with linenoisePreloadBuffer
 static string preloadErrorMessage;
 
-static string autoDedentIndentStr;   // used with linenoiseSetAutoDedent
-static char32_t autoDedentChar = 0;  // character that triggers auto-dedent (e.g. '}')
+// Auto-dedent configuration — set once at init via linenoiseSetAutoDedent(),
+// then only read during input.  Same thread-safety model as preloadedBufferContents:
+// the Qore binding serialises writes; reads happen on the single input thread.
+static string autoDedentIndentStr;
+static char32_t autoDedentChar = 0;
 
 bool InputBuffer::tryAutoDedent(char32_t c) {
   if (autoDedentChar == 0 || c != autoDedentChar || autoDedentIndentStr.empty()) {
@@ -3158,9 +3159,6 @@ bool InputBuffer::tryAutoDedent(char32_t c) {
   memmove(charWidths, charWidths + removeCount, sizeof(char) * (len - removeCount));
   len -= removeCount;
   pos -= removeCount;
-  if (pos < 0) {
-    pos = 0;
-  }
   buf32[len] = '\0';
   return true;
 }
