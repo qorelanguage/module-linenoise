@@ -155,6 +155,10 @@ Linenoise::set_callback(\my_callback());
 
     @section linenoisereleasenotes linenoise Module Release Notes
 
+    @subsection linenoise_1_3_0 linenoise Module Version 1.3.0
+    - added @ref Qore::Linenoise::set_hints_callback() for displaying inline hints
+      (e.g., function signatures) after the cursor in dim text
+
     @subsection linenoise_1_2_0 linenoise Module Version 1.2.0
     - added @ref Qore::Linenoise::set_auto_dedent() for automatic dedent when typing
       closing characters (e.g., @c }) on indented lines
@@ -195,6 +199,7 @@ void init_linenoise_functions(QoreNamespace& ns);
 
 QoreRecursiveThreadLock lock;
 ResolvedCallReferenceNode* callbackNode = nullptr;
+ResolvedCallReferenceNode* hintsCallbackNode = nullptr;
 
 void qore_linenoise_completion_cb(const char *input, linenoiseCompletions *lc) {
     AutoLocker al(lock);
@@ -231,10 +236,62 @@ void qore_linenoise_completion_cb(const char *input, linenoiseCompletions *lc) {
     }
 }
 
+char* qore_linenoise_hints_cb(const char* input, int* color, int* bold) {
+    AutoLocker al(lock);
+
+    if (!hintsCallbackNode) {
+        return NULL;
+    }
+
+    ExceptionSink xsink;
+
+    ValueHolder ret(&xsink);
+    {
+        ReferenceHolder<QoreListNode> args(new QoreListNode(autoTypeInfo), &xsink);
+        args->push(new QoreStringNode(input, QCS_UTF8), nullptr);
+        ret = hintsCallbackNode->execValue(*args, &xsink);
+    }
+
+    if (xsink.isException()) {
+        xsink.clear();
+        return NULL;
+    }
+
+    if (ret->getType() == NT_STRING) {
+        // Return plain string hint with default color (dark grey)
+        *color = 90;  // bright black (dark grey)
+        *bold = 0;
+        QoreStringNode* str = ret->get<QoreStringNode>();
+        return strdup(str->c_str());
+    }
+
+    if (ret->getType() == NT_HASH) {
+        // Hash with {text, color, bold} keys
+        QoreHashNode* h = ret->get<QoreHashNode>();
+        QoreValue text = h->getKeyValue("text");
+        if (text.getType() != NT_STRING) {
+            return NULL;
+        }
+        QoreValue c = h->getKeyValue("color");
+        *color = c.getType() == NT_INT ? (int)c.getAsBigInt() : 90;
+        QoreValue b = h->getKeyValue("bold");
+        *bold = b.getAsBool() ? 1 : 0;
+        return strdup(text.get<QoreStringNode>()->c_str());
+    }
+
+    return NULL;
+}
+
+void qore_linenoise_free_hints_cb(void* hint) {
+    free(hint);
+}
+
 static void linenoise_module_init(QoreModuleInitContext& ctx, ExceptionSink& xsink) {
     init_linenoise_functions(LinenoiseNS);
 
     linenoiseSetCompletionCallback(qore_linenoise_completion_cb);
+    linenoiseSetHintsCallback(qore_linenoise_hints_cb);
+    linenoiseSetFreeHintsCallback(qore_linenoise_free_hints_cb);
 }
 
 static void linenoise_module_ns_init(QoreNamespace* rns, QoreNamespace* qns, ExceptionSink& xsink) {
@@ -242,9 +299,12 @@ static void linenoise_module_ns_init(QoreNamespace* rns, QoreNamespace* qns, Exc
 }
 
 static void linenoise_module_delete() {
+    ExceptionSink xsink;
     if (callbackNode) {
-        ExceptionSink xsink;
         callbackNode->deref(&xsink);
+    }
+    if (hintsCallbackNode) {
+        hintsCallbackNode->deref(&xsink);
     }
 }
 
@@ -496,5 +556,33 @@ nothing set_auto_dedent(string indent_str, string dedent_char) {
         dc = static_cast<char32_t>(dedent_char->getUnicodePointFromUTF8(0));
     }
     linenoiseSetAutoDedent(indent_str->c_str(), dc);
+}
+
+//! Set hints callback function for inline argument display
+/**
+    @param callback a function/method reference or a closure to handle hints callback.
+    The callback receives a string (the current input line) and should return one of:
+    - a string: displayed as a dim grey hint after the cursor
+    - a hash with keys: \c text (string), \c color (int ANSI color code), \c bold (bool)
+    - @ref nothing "NOTHING": no hint displayed
+
+    @par Example
+    @code{.py}
+Linenoise::set_hints_callback(sub (string input) {
+    if (input == "printf(") {
+        return " string fmt, ...";
+    }
+});
+    @endcode
+
+    @since linenoise 1.3.0
+ */
+nothing set_hints_callback(code callback) {
+    AutoLocker al(lock);
+
+    if (hintsCallbackNode) {
+        hintsCallbackNode->deref(xsink);
+    }
+    hintsCallbackNode = callback->refRefSelf();
 }
 ///@}

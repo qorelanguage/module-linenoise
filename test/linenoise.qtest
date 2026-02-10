@@ -53,6 +53,12 @@ class LinenoiseTest inherits Test {
         addTestCase("set_callback() accepts function reference", \testSetCallbackFunctionRef());
         addTestCase("set_callback() can be replaced", \testSetCallbackReplace());
 
+        # Hints callback tests
+        addTestCase("set_hints_callback() accepts closure", \testSetHintsCallbackClosure());
+        addTestCase("set_hints_callback() accepts function reference", \testSetHintsCallbackFuncRef());
+        addTestCase("set_hints_callback() can be replaced", \testSetHintsCallbackReplace());
+        addTestCase("set_hints_callback() hash return", \testSetHintsCallbackHash());
+
         # Preload buffer tests
         addTestCase("preload_buffer() basic", \testPreloadBufferBasic());
 
@@ -378,17 +384,13 @@ class LinenoiseTest inherits Test {
         };
 
         # Verify setting callback doesn't throw - test passes if no exception
-        Linenoise::set_callback(callback);
-        # If we reach here, the callback was set successfully
-        assertEq(1, 1);
+        assertNothing(Linenoise::set_callback(callback));
     }
 
     testSetCallbackFunctionRef() {
         resetHistory();
         # Verify setting callback with function reference doesn't throw
-        Linenoise::set_callback(\dummyCallback());
-        # If we reach here, the callback was set successfully
-        assertEq(1, 1);
+        assertNothing(Linenoise::set_callback(\dummyCallback()));
     }
 
     testSetCallbackReplace() {
@@ -401,10 +403,52 @@ class LinenoiseTest inherits Test {
         };
 
         # Verify callbacks can be replaced without error
-        Linenoise::set_callback(callback1);
-        Linenoise::set_callback(callback2);
-        # If we reach here, the callback replacement succeeded
-        assertEq(1, 1);
+        assertNothing(Linenoise::set_callback(callback1));
+        assertNothing(Linenoise::set_callback(callback2));
+    }
+
+    # ==================== Hints Callback Tests ====================
+
+    testSetHintsCallbackClosure() {
+        resetHistory();
+        code<auto(string)> callback = auto sub (string input) {
+            if (input == "printf(") {
+                return " string fmt, ...";
+            }
+        };
+
+        # Verify setting hints callback doesn't throw
+        assertNothing(Linenoise::set_hints_callback(callback));
+    }
+
+    testSetHintsCallbackFuncRef() {
+        resetHistory();
+        # Verify setting hints callback with function reference doesn't throw
+        assertNothing(Linenoise::set_hints_callback(\dummyHintsCallback()));
+    }
+
+    testSetHintsCallbackReplace() {
+        resetHistory();
+        code<auto(string)> callback1 = auto sub (string input) {
+            return " hint 1";
+        };
+        code<auto(string)> callback2 = auto sub (string input) {
+            return " hint 2";
+        };
+
+        # Verify callbacks can be replaced without error
+        assertNothing(Linenoise::set_hints_callback(callback1));
+        assertNothing(Linenoise::set_hints_callback(callback2));
+    }
+
+    testSetHintsCallbackHash() {
+        resetHistory();
+        code<auto(string)> callback = auto sub (string input) {
+            return {"text": " some hint", "color": 33, "bold": True};
+        };
+
+        # Verify setting hints callback with hash-returning closure doesn't throw
+        assertNothing(Linenoise::set_hints_callback(callback));
     }
 
     # ==================== Preload Buffer Tests ====================
@@ -535,4 +579,9 @@ class LinenoiseTest inherits Test {
 # Helper function for callback tests
 list<string> sub dummyCallback(string input) {
     return ("dummy",);
+}
+
+# Helper function for hints callback tests
+*string sub dummyHintsCallback(string input) {
+    return " hint text";
 }

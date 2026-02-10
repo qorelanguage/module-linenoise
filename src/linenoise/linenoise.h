@@ -48,7 +48,11 @@ extern "C" {
 typedef struct linenoiseCompletions linenoiseCompletions;
 
 typedef void(linenoiseCompletionCallback)(const char*, linenoiseCompletions*);
+typedef char*(linenoiseHintsCallback)(const char *buf, int *color, int *bold);
+typedef void(linenoiseFreeHintsCallback)(void *hint);
 void linenoiseSetCompletionCallback(linenoiseCompletionCallback* fn);
+void linenoiseSetHintsCallback(linenoiseHintsCallback* fn);
+void linenoiseSetFreeHintsCallback(linenoiseFreeHintsCallback* fn);
 void linenoiseAddCompletion(linenoiseCompletions* lc, const char* str);
 
 char* linenoise(const char* prompt);

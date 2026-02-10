@@ -948,6 +948,8 @@ static const int PAGE_DOWN_KEY = 0x11200000;
 
 static const char* unsupported_term[] = {"dumb", "cons25", "emacs", NULL};
 static linenoiseCompletionCallback* completionCallback = NULL;
+static linenoiseHintsCallback* hintsCallback = NULL;
+static linenoiseFreeHintsCallback* freeHintsCallback = NULL;
 
 #ifdef _WIN32
 static HANDLE console_in, console_out;
@@ -1344,6 +1346,32 @@ void InputBuffer::refreshLine(PromptBase& pi) {
     if (write32(1, &buf32[highlight], 1) == -1) return;
     setDisplayAttribute(false, indicateError);
     if (write32(1, buf32 + highlight + 1, len - highlight - 1) == -1) return;
+  }
+
+  // display hints after the input text (display-only, does not affect cursor)
+  if (hintsCallback) {
+    // convert buf32 to UTF-8 for the callback
+    size_t buf8Size = sizeof(char32_t) * len + 1;
+    unique_ptr<char[]> buf8(new char[buf8Size]);
+    copyString32to8(buf8.get(), buf8Size, buf32);
+    int color = 0;
+    int bold = 0;
+    char* hint = hintsCallback(buf8.get(), &color, &bold);
+    if (hint) {
+      auto hintDeleter = [](char* p) {
+        if (freeHintsCallback) {
+          freeHintsCallback(p);
+        } else {
+          free(p);
+        }
+      };
+      unique_ptr<char, decltype(hintDeleter)> hintGuard(hint, hintDeleter);
+      char hintSeq[64];
+      snprintf(hintSeq, sizeof hintSeq, "\x1b[%d;%dm", bold ? 1 : 2, color);
+      if (write(1, hintSeq, strlen(hintSeq)) == -1) return;
+      if (write(1, hint, strlen(hint)) == -1) return;
+      if (write(1, "\x1b[0m", 4) == -1) return;
+    }
   }
 
   // we have to generate our own newline on line wrap
@@ -3329,6 +3357,14 @@ char* linenoise(const char* prompt) {
 /* Register a callback function to be called for tab-completion. */
 void linenoiseSetCompletionCallback(linenoiseCompletionCallback* fn) {
   completionCallback = fn;
+}
+
+void linenoiseSetHintsCallback(linenoiseHintsCallback* fn) {
+  hintsCallback = fn;
+}
+
+void linenoiseSetFreeHintsCallback(linenoiseFreeHintsCallback* fn) {
+  freeHintsCallback = fn;
 }
 
 void linenoiseAddCompletion(linenoiseCompletions* lc, const char* str) {
