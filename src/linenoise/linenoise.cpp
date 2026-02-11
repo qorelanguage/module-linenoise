@@ -112,6 +112,9 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <poll.h>
 #include <cctype>
 #include <wctype.h>
 
@@ -127,6 +130,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <unordered_map>
 
 using std::string;
 using std::vector;
@@ -867,17 +871,140 @@ class KillRing {
   }
 };
 
+// Undo/redo system: saves buffer state before destructive operations
+struct UndoState {
+  Utf32String text;
+  int pos;
+  UndoState() : pos(0) {}
+  UndoState(const char32_t* buf, int len, int p) : text(buf, len), pos(p) {}
+};
+
+class UndoStack {
+  std::vector<UndoState> undoEntries;
+  std::vector<UndoState> redoEntries;
+  static const size_t MAX_ENTRIES = 100;
+  int lastSaveLen;  // track last saved length for coalescing consecutive inserts
+  int lastSavePos;
+  bool lastWasInsert;
+
+ public:
+  UndoStack() : lastSaveLen(0), lastSavePos(0), lastWasInsert(false) {}
+
+  void save(const char32_t* buf, int len, int pos, bool isInsert = false) {
+    // Coalesce consecutive character insertions
+    if (isInsert && lastWasInsert && !undoEntries.empty()) {
+      lastSaveLen = len;
+      lastSavePos = pos;
+      return;
+    }
+    lastWasInsert = isInsert;
+    lastSaveLen = len;
+    lastSavePos = pos;
+    if (undoEntries.size() >= MAX_ENTRIES) {
+      undoEntries.erase(undoEntries.begin());
+    }
+    undoEntries.push_back(UndoState(buf, len, pos));
+    redoEntries.clear();
+  }
+
+  void breakCoalescing() {
+    lastWasInsert = false;
+  }
+
+  bool undo(char32_t* buf, int buflen, int& len, int& pos) {
+    if (undoEntries.empty()) return false;
+    // Save current state to redo stack
+    redoEntries.push_back(UndoState(buf, len, pos));
+    // Restore from undo stack
+    UndoState& state = undoEntries.back();
+    int restoreLen = static_cast<int>(state.text.length());
+    if (restoreLen > buflen) restoreLen = buflen;
+    memcpy(buf, state.text.get(), sizeof(char32_t) * restoreLen);
+    buf[restoreLen] = '\0';
+    len = restoreLen;
+    pos = state.pos;
+    if (pos > len) pos = len;
+    undoEntries.pop_back();
+    lastWasInsert = false;
+    return true;
+  }
+
+  bool redo(char32_t* buf, int buflen, int& len, int& pos) {
+    if (redoEntries.empty()) return false;
+    // Save current state to undo stack
+    undoEntries.push_back(UndoState(buf, len, pos));
+    // Restore from redo stack
+    UndoState& state = redoEntries.back();
+    int restoreLen = static_cast<int>(state.text.length());
+    if (restoreLen > buflen) restoreLen = buflen;
+    memcpy(buf, state.text.get(), sizeof(char32_t) * restoreLen);
+    buf[restoreLen] = '\0';
+    len = restoreLen;
+    pos = state.pos;
+    if (pos > len) pos = len;
+    redoEntries.pop_back();
+    lastWasInsert = false;
+    return true;
+  }
+
+  void clear() {
+    undoEntries.clear();
+    redoEntries.clear();
+    lastSaveLen = 0;
+    lastSavePos = 0;
+    lastWasInsert = false;
+  }
+};
+
+static UndoStack undoStack;
+
 class InputBuffer {
   char32_t* buf32;   // input buffer
   char* charWidths;  // character widths from mk_wcwidth()
   int buflen;        // buffer size in characters
   int len;           // length of text in input buffer
   int pos;           // character position in buffer ( 0 <= pos <= len )
+  int terminatingKeystroke;  // used by history search to pass back terminating key
 
   void clearScreen(PromptBase& pi);
   int incrementalHistorySearch(PromptBase& pi, int startChar);
   int completeLine(PromptBase& pi);
   void refreshLine(PromptBase& pi);
+
+  // Key handler methods for dispatch table
+  // Return: 0 = continue editing, 1 = accept line, -1 = abort/error
+  int handleTimeout(PromptBase& pi, KillRing& killRing, int c);
+  int handleMoveToStart(PromptBase& pi, KillRing& killRing, int c);
+  int handleMoveLeft(PromptBase& pi, KillRing& killRing, int c);
+  int handleMoveWordLeft(PromptBase& pi, KillRing& killRing, int c);
+  int handleAbort(PromptBase& pi, KillRing& killRing, int c);
+  int handleCapitalizeWord(PromptBase& pi, KillRing& killRing, int c);
+  int handleDeleteOrExit(PromptBase& pi, KillRing& killRing, int c);
+  int handleKillWordRight(PromptBase& pi, KillRing& killRing, int c);
+  int handleMoveToEnd(PromptBase& pi, KillRing& killRing, int c);
+  int handleMoveRight(PromptBase& pi, KillRing& killRing, int c);
+  int handleMoveWordRight(PromptBase& pi, KillRing& killRing, int c);
+  int handleBackspace(PromptBase& pi, KillRing& killRing, int c);
+  int handleKillWordLeft(PromptBase& pi, KillRing& killRing, int c);
+  int handleAcceptLine(PromptBase& pi, KillRing& killRing, int c);
+  int handleKillToEnd(PromptBase& pi, KillRing& killRing, int c);
+  int handleClearScreenCmd(PromptBase& pi, KillRing& killRing, int c);
+  int handleLowercaseWord(PromptBase& pi, KillRing& killRing, int c);
+  int handleHistoryNavigate(PromptBase& pi, KillRing& killRing, int c);
+  int handleHistorySearch(PromptBase& pi, KillRing& killRing, int c);
+  int handleTranspose(PromptBase& pi, KillRing& killRing, int c);
+  int handleKillToStart(PromptBase& pi, KillRing& killRing, int c);
+  int handleUppercaseWord(PromptBase& pi, KillRing& killRing, int c);
+  int handleKillToWhitespace(PromptBase& pi, KillRing& killRing, int c);
+  int handleYank(PromptBase& pi, KillRing& killRing, int c);
+  int handleYankPop(PromptBase& pi, KillRing& killRing, int c);
+  int handleUndo(PromptBase& pi, KillRing& killRing, int c);
+  int handleSuspend(PromptBase& pi, KillRing& killRing, int c);
+  int handleDelete(PromptBase& pi, KillRing& killRing, int c);
+  int handleInsertToggle(PromptBase& pi, KillRing& killRing, int c);
+  int handleBracketedPaste(PromptBase& pi, KillRing& killRing, int c);
+  int handleHistoryJump(PromptBase& pi, KillRing& killRing, int c);
+  int handleMacro(PromptBase& pi, KillRing& killRing, int c);
 
  public:
   InputBuffer(char32_t* buffer, char* widthArray, int bufferLen)
@@ -885,7 +1012,8 @@ class InputBuffer {
         charWidths(widthArray),
         buflen(bufferLen - 1),
         len(0),
-        pos(0) {
+        pos(0),
+        terminatingKeystroke(-1) {
     buf32[0] = 0;
   }
   void preloadBuffer(const char* preloadText) {
@@ -898,6 +1026,8 @@ class InputBuffer {
   bool tryAutoDedent(char32_t c);
   int getInputLine(PromptBase& pi);
   int length(void) const { return len; }
+
+  friend void initDefaultBindings();
 };
 
 // Special codes for keyboard input:
@@ -945,11 +1075,61 @@ static const int END_KEY = 0x10C00000;
 static const int DELETE_KEY = 0x10E00000;
 static const int PAGE_UP_KEY = 0x11000000;
 static const int PAGE_DOWN_KEY = 0x11200000;
+static const int INSERT_KEY = 0x11400000;
+static const int BRACKETED_PASTE_START = 0x11600000;
+static const int TIMEOUT_KEY = 0x11800000;
 
 static const char* unsupported_term[] = {"dumb", "cons25", "emacs", NULL};
 static linenoiseCompletionCallback* completionCallback = NULL;
 static linenoiseHintsCallback* hintsCallback = NULL;
 static linenoiseFreeHintsCallback* freeHintsCallback = NULL;
+static linenoiseSyntaxCallback* syntaxCallback = NULL;
+static std::string rightPromptText;
+static bool maskMode = false;
+static bool insertMode = true;
+static bool menuCompleteEnabled = false;
+static bool completionCaseInsensitive = false;
+static bool filenameCompletionEnabled = false;
+static int readTimeoutMs = 0;
+
+// Keyboard macro recorder
+class MacroRecorder {
+  std::vector<int> recordBuffer;
+  bool recording;
+
+ public:
+  MacroRecorder() : recording(false) {}
+
+  void startRecording() {
+    recording = true;
+    recordBuffer.clear();
+  }
+
+  void stopRecording() {
+    recording = false;
+  }
+
+  void addKeystroke(int c) {
+    if (recording) {
+      recordBuffer.push_back(c);
+    }
+  }
+
+  bool isRecording() const { return recording; }
+
+  const std::vector<int>& getMacro() const { return recordBuffer; }
+};
+
+static MacroRecorder macroRecorder;
+static std::vector<int> pendingKeystrokes;
+
+// Menu-complete state
+static bool menuCompleteActive = false;
+static int menuCompleteIndex = 0;
+static int menuCompleteStartIndex = 0;
+static int menuCompleteOrigLen = 0;
+static int menuCompleteOrigPos = 0;
+static Utf32String menuCompleteOrigText;  // saved original text for cycling
 
 #ifdef _WIN32
 static HANDLE console_in, console_out;
@@ -1044,6 +1224,8 @@ static int enableRawMode(void) {
   /* put terminal in raw mode after flushing */
   if (tcsetattr(0, TCSADRAIN, &raw) < 0) goto fatal;
   rawmode = 1;
+  // enable bracketed paste mode
+  if (write(1, "\x1b[?2004h", 8) == -1) { /* ignore */ }
   return 0;
 
 fatal:
@@ -1058,7 +1240,11 @@ static void disableRawMode(void) {
   console_in = 0;
   console_out = 0;
 #else
-  if (rawmode && tcsetattr(0, TCSADRAIN, &orig_termios) != -1) rawmode = 0;
+  if (rawmode) {
+    // disable bracketed paste mode and reset cursor shape before restoring terminal
+    if (write(1, "\x1b[?2004l\x1b[0 q", 13) == -1) { /* ignore */ }
+    if (tcsetattr(0, TCSADRAIN, &orig_termios) != -1) rawmode = 0;
+  }
 #endif
 }
 
@@ -1230,7 +1416,7 @@ void InputBuffer::refreshLine(PromptBase& pi) {
   // check for a matching brace/bracket/paren, remember its position if found
   int highlight = -1;
   bool indicateError = false;
-  if (pos < len) {
+  if (!maskMode && pos < len) {
     /* this scans for a brace matching buf32[pos] to highlight */
     unsigned char part1, part2;
     int scanDirection = 0;
@@ -1311,7 +1497,11 @@ void InputBuffer::refreshLine(PromptBase& pi) {
   pi.promptPreviousInputLen = len;
 
   // display the input line
-  if (highlight == -1) {
+  if (maskMode) {
+    for (int i = 0; i < len; ++i) {
+      if (write(1, "*", 1) == -1) return;
+    }
+  } else if (highlight == -1) {
     if (write32(1, buf32, len) == -1) return;
   } else {
     if (write32(1, buf32, highlight) == -1) return;
@@ -1338,7 +1528,56 @@ void InputBuffer::refreshLine(PromptBase& pi) {
            pi.promptIndentation + 1);  // 1-based on VT100
   if (write(1, seq, strlen(seq)) == -1) return;
 
-  if (highlight == -1) {  // write unhighlighted text
+  if (maskMode) {  // write mask characters instead of actual content
+    for (int i = 0; i < len; ++i) {
+      if (write(1, "*", 1) == -1) return;
+    }
+  } else if (syntaxCallback && highlight == -1) {
+    // syntax highlighting: get colorized output from callback
+    size_t buf8Size = sizeof(char32_t) * len + 1;
+    unique_ptr<char[]> buf8(new char[buf8Size]);
+    copyString32to8(buf8.get(), buf8Size, buf32);
+    char* colorized = syntaxCallback(buf8.get());
+    if (colorized) {
+      if (write(1, colorized, strlen(colorized)) == -1) { free(colorized); return; }
+      free(colorized);
+      // reset attributes after syntax highlighted output
+      if (write(1, "\x1b[0m", 4) == -1) return;
+    } else {
+      if (write32(1, buf32, len) == -1) return;
+    }
+  } else if (syntaxCallback && highlight != -1) {
+    // syntax highlighting with brace match: write highlighted char with brace color override
+    size_t buf8Size = sizeof(char32_t) * len + 1;
+    unique_ptr<char[]> buf8(new char[buf8Size]);
+    copyString32to8(buf8.get(), buf8Size, buf32);
+    char* colorized = syntaxCallback(buf8.get());
+    if (colorized) {
+      // Write the colorized text but we can't easily extract the brace position
+      // from the ANSI-colored output, so write the full colorized text and then
+      // overlay the brace highlight by repositioning cursor
+      if (write(1, colorized, strlen(colorized)) == -1) { free(colorized); return; }
+      free(colorized);
+      if (write(1, "\x1b[0m", 4) == -1) return;
+      // Now overlay the brace highlight character
+      int highlightCol = pi.promptIndentation + calculateColumnPosition(buf32, highlight);
+      snprintf(seq, sizeof seq, "\x1b[%dG", highlightCol + 1);
+      if (write(1, seq, strlen(seq)) == -1) return;
+      setDisplayAttribute(true, indicateError);
+      if (write32(1, &buf32[highlight], 1) == -1) return;
+      setDisplayAttribute(false, indicateError);
+      // Move cursor to end of line for subsequent output (hints/right prompt)
+      int endCol = pi.promptIndentation + calculateColumnPosition(buf32, len);
+      snprintf(seq, sizeof seq, "\x1b[%dG", endCol + 1);
+      if (write(1, seq, strlen(seq)) == -1) return;
+    } else {
+      if (write32(1, buf32, highlight) == -1) return;
+      setDisplayAttribute(true, indicateError);
+      if (write32(1, &buf32[highlight], 1) == -1) return;
+      setDisplayAttribute(false, indicateError);
+      if (write32(1, buf32 + highlight + 1, len - highlight - 1) == -1) return;
+    }
+  } else if (highlight == -1) {  // write unhighlighted text
     if (write32(1, buf32, len) == -1) return;
   } else {  // highlight the matching brace/bracket/parenthesis
     if (write32(1, buf32, highlight) == -1) return;
@@ -1349,7 +1588,7 @@ void InputBuffer::refreshLine(PromptBase& pi) {
   }
 
   // display hints after the input text (display-only, does not affect cursor)
-  if (hintsCallback) {
+  if (!maskMode && hintsCallback) {
     // convert buf32 to UTF-8 for the callback
     size_t buf8Size = sizeof(char32_t) * len + 1;
     unique_ptr<char[]> buf8(new char[buf8Size]);
@@ -1371,6 +1610,25 @@ void InputBuffer::refreshLine(PromptBase& pi) {
       if (write(1, hintSeq, strlen(hintSeq)) == -1) return;
       if (write(1, hint, strlen(hint)) == -1) return;
       if (write(1, "\x1b[0m", 4) == -1) return;
+    }
+  }
+
+  // display right prompt at right edge of first line (when input fits on one line)
+  if (!maskMode && !rightPromptText.empty() && yEndOfInput == 0) {
+    // convert right prompt to char32_t to measure column width
+    size_t rpBufSize = rightPromptText.size() + 1;
+    unique_ptr<char32_t[]> rpBuf32(new char32_t[rpBufSize]);
+    size_t rpLen32 = 0;
+    copyString8to32(rpBuf32.get(), rpBufSize, rpLen32, rightPromptText.c_str());
+    int rpColWidth = calculateColumnPosition(rpBuf32.get(), static_cast<int>(rpLen32));
+    int rpStartCol = pi.promptScreenColumns - rpColWidth;
+    // only display if there are at least 2 chars of gap between content and right prompt
+    if (rpStartCol > xEndOfInput + 2) {
+      snprintf(seq, sizeof seq, "\x1b[%dG", rpStartCol + 1);  // 1-based
+      if (write(1, seq, strlen(seq)) == -1) return;
+      if (write(1, "\x1b[2m", 4) == -1) return;  // dim attribute
+      if (write(1, rightPromptText.c_str(), rightPromptText.size()) == -1) return;
+      if (write(1, "\x1b[0m", 4) == -1) return;  // reset attributes
     }
   }
 
@@ -1407,6 +1665,19 @@ static char32_t readUnicodeCharacter(void) {
   static size_t utf8Count = 0;
   while (true) {
     char8_t c;
+
+#ifndef _WIN32
+    // Apply read timeout if configured (only on first byte of multi-byte sequence)
+    if (readTimeoutMs > 0 && utf8Count == 0) {
+      struct pollfd pfd;
+      pfd.fd = 0;
+      pfd.events = POLLIN;
+      pfd.revents = 0;
+      int ret = poll(&pfd, 1, readTimeoutMs);
+      if (ret == 0) return TIMEOUT_KEY;  // timeout
+      if (ret < 0 && errno != EINTR) return 0;  // error
+    }
+#endif
 
     /* Continue reading if interrupted by signal. */
     ssize_t nread;
@@ -1539,6 +1810,12 @@ static char32_t deleteCharRoutine(char32_t) {
 static char32_t deleteKeyRoutine(char32_t) {
   return thisKeyMetaCtrl | DELETE_KEY;
 }  // key labeled Delete
+static char32_t insertKeyRoutine(char32_t) {
+  return thisKeyMetaCtrl | INSERT_KEY;
+}  // key labeled Insert
+static char32_t bracketedPasteStartRoutine(char32_t) {
+  return BRACKETED_PASTE_START;
+}
 static char32_t ctrlUpArrowKeyRoutine(char32_t) {
   return thisKeyMetaCtrl | CTRL | UP_ARROW_KEY;
 }
@@ -1648,8 +1925,29 @@ static char32_t escLeftBracket1Routine(char32_t c) {
   if (c == 0) return 0;
   return doDispatch(c, escLeftBracket1Dispatch);
 }
+// Handle ESC [ 2 <more stuff> escape sequences
+// ESC [ 2 ~ = Insert key
+// ESC [ 2 0 0 ~ = Bracketed paste start
 static char32_t escLeftBracket2Routine(char32_t c) {
-  return escFailureRoutine(c);  // Insert key, unused
+  c = readUnicodeCharacter();
+  if (c == 0) return 0;
+  if (c == '~') {
+    return insertKeyRoutine(c);
+  }
+  if (c == '0') {
+    // could be ESC [ 2 0 0 ~ (bracketed paste start) or ESC [ 2 0 1 ~ (paste end)
+    c = readUnicodeCharacter();
+    if (c == 0) return 0;
+    if (c == '0') {
+      c = readUnicodeCharacter();
+      if (c == 0) return 0;
+      if (c == '~') {
+        return bracketedPasteStartRoutine(c);
+      }
+    }
+    // ESC [ 2 0 1 ~ (paste end) should not arrive outside paste mode, ignore
+  }
+  return escFailureRoutine(c);
 }
 static char32_t escLeftBracket3Routine(char32_t c) {
   c = readUnicodeCharacter();
@@ -1979,6 +2277,76 @@ static const char breakChars[] = " =+-/\\*?\"'`&<>:;|@{([])}";
 // maximum number of completions to display without asking
 static const size_t completionCountCutoff = 100;
 
+#ifndef _WIN32
+// Built-in filename completion callback
+static void filenameCompletionCallback(const char* input, linenoiseCompletions* lc) {
+  // Find the word being completed by scanning back for break characters
+  const char* wordStart = input + strlen(input);
+  while (wordStart > input) {
+    --wordStart;
+    if (*wordStart == ' ' || *wordStart == '=' || *wordStart == ';' ||
+        *wordStart == '|' || *wordStart == '&' || *wordStart == '(' ||
+        *wordStart == ')') {
+      ++wordStart;
+      break;
+    }
+  }
+
+  // Split into directory and prefix
+  std::string word(wordStart);
+  std::string dirPath;
+  std::string prefix;
+
+  size_t lastSlash = word.rfind('/');
+  if (lastSlash != std::string::npos) {
+    dirPath = word.substr(0, lastSlash + 1);
+    prefix = word.substr(lastSlash + 1);
+  } else {
+    dirPath = "";
+    prefix = word;
+  }
+
+  std::string openDir = dirPath.empty() ? "." : dirPath;
+  DIR* dir = opendir(openDir.c_str());
+  if (!dir) return;
+
+  struct dirent* entry;
+  while ((entry = readdir(dir)) != NULL) {
+    std::string name(entry->d_name);
+    // Skip . and ..
+    if (name == "." || name == "..") continue;
+
+    // Check prefix match
+    bool matches;
+    if (completionCaseInsensitive) {
+      matches = (name.length() >= prefix.length());
+      if (matches) {
+        for (size_t i = 0; i < prefix.length(); ++i) {
+          if (tolower(name[i]) != tolower(prefix[i])) {
+            matches = false;
+            break;
+          }
+        }
+      }
+    } else {
+      matches = (name.compare(0, prefix.length(), prefix) == 0);
+    }
+
+    if (matches) {
+      std::string completion = dirPath + name;
+      // Check if directory to append /
+      std::string fullPath = openDir + "/" + name;
+      struct stat st;
+      if (stat(fullPath.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+        completion += "/";
+      }
+      linenoiseAddCompletion(lc, completion.c_str());
+    }
+  }
+  closedir(dir);
+}
+#endif
+
 /**
  * Handle command completion, using a completionCallback() routine to provide
  * possible substitutions
@@ -2011,7 +2379,14 @@ int InputBuffer::completeLine(PromptBase& pi) {
   Utf8String fullLine(fullLineCopy);
 
   // get a list of completions
-  completionCallback(fullLine.get(), &lc);
+  if (completionCallback) {
+    completionCallback(fullLine.get(), &lc);
+  }
+#ifndef _WIN32
+  else if (filenameCompletionEnabled) {
+    filenameCompletionCallback(fullLine.get(), &lc);
+  }
+#endif
 
   // if no completions, we are done
   if (lc.completionStrings.size() == 0) {
@@ -2031,6 +2406,10 @@ int InputBuffer::completeLine(PromptBase& pi) {
       for (size_t j = 0; j < lc.completionStrings.size() - 1; ++j) {
         char32_t c1 = lc.completionStrings[j][longestCommonPrefix];
         char32_t c2 = lc.completionStrings[j + 1][longestCommonPrefix];
+        if (completionCaseInsensitive) {
+          c1 = towlower(c1);
+          c2 = towlower(c2);
+        }
         if ((0 == c1) || (0 == c2) || (c1 != c2)) {
           keepGoing = false;
           break;
@@ -2064,7 +2443,68 @@ int InputBuffer::completeLine(PromptBase& pi) {
     pos = startIndex + longestCommonPrefix;
     len = displayLength;
     refreshLine(pi);
+    freeCompletions(&lc);
     return 0;
+  }
+
+  // Menu-complete mode: cycle through completions on each Tab press
+  if (menuCompleteEnabled && lc.completionStrings.size() > 1) {
+    // Save original buffer state for cycling
+    menuCompleteOrigText = Utf32String(buf32, len);
+    menuCompleteOrigLen = len;
+    menuCompleteOrigPos = pos;
+    menuCompleteStartIndex = startIndex;
+    menuCompleteIndex = 0;
+    menuCompleteActive = true;
+
+    // Replace with first completion
+    while (menuCompleteActive) {
+      int compLen = static_cast<int>(lc.completionStrings[menuCompleteIndex].length());
+      int newLen = menuCompleteStartIndex + compLen +
+                   (menuCompleteOrigLen - menuCompleteOrigPos);
+      if (newLen > buflen) {
+        newLen = buflen;
+        compLen = buflen - menuCompleteStartIndex -
+                  (menuCompleteOrigLen - menuCompleteOrigPos);
+        if (compLen < 0) {
+          compLen = 0;
+        }
+      }
+      // Build new buffer: prefix + completion + suffix
+      memcpy(buf32, menuCompleteOrigText.get(),
+             sizeof(char32_t) * menuCompleteStartIndex);
+      memcpy(buf32 + menuCompleteStartIndex,
+             lc.completionStrings[menuCompleteIndex].get(),
+             sizeof(char32_t) * compLen);
+      int tailStart = menuCompleteStartIndex + compLen;
+      int tailLen = menuCompleteOrigLen - menuCompleteOrigPos;
+      if (tailStart + tailLen > buflen) {
+        tailLen = buflen - tailStart;
+      }
+      memcpy(buf32 + tailStart,
+             menuCompleteOrigText.get() + menuCompleteOrigPos,
+             sizeof(char32_t) * tailLen);
+      len = tailStart + tailLen;
+      pos = menuCompleteStartIndex + compLen;
+      buf32[len] = '\0';
+      refreshLine(pi);
+
+      // Read next keystroke
+      do {
+        c = linenoiseReadChar();
+        c = cleanupCtrl(c);
+      } while (c == static_cast<char32_t>(-1));
+
+      if (c == ctrlChar('I')) {  // another Tab: cycle to next
+        menuCompleteIndex =
+            (menuCompleteIndex + 1) % static_cast<int>(lc.completionStrings.size());
+      } else {
+        // Accept current completion, pass this keystroke to main loop
+        menuCompleteActive = false;
+        freeCompletions(&lc);
+        return c;
+      }
+    }
   }
 
   // we can't complete any further, wait for second tab
@@ -2223,6 +2663,30 @@ int InputBuffer::completeLine(PromptBase& pi) {
 /**
  * Clear the screen ONLY (no redisplay of anything)
  */
+void linenoiseMaskModeEnable(void) {
+  maskMode = true;
+}
+
+void linenoiseMaskModeDisable(void) {
+  maskMode = false;
+}
+
+void linenoiseSetMenuComplete(int enable) {
+  menuCompleteEnabled = enable != 0;
+}
+
+void linenoiseSetCompletionCaseInsensitive(int ci) {
+  completionCaseInsensitive = ci != 0;
+}
+
+void linenoiseSetFilenameCompletion(int enable) {
+  filenameCompletionEnabled = enable != 0;
+}
+
+void linenoiseSetReadTimeout(int ms) {
+  readTimeoutMs = ms;
+}
+
 void linenoiseClearScreen(void) {
 #ifdef _WIN32
   COORD coord = {0, 0};
@@ -2540,8 +3004,690 @@ static bool gotResize = false;
 #endif
 static int keyType = 0;
 
+// Key handler dispatch table types and initialization
+using KeyHandler = int (InputBuffer::*)(PromptBase&, KillRing&, int);
+static std::unordered_map<int, KeyHandler> defaultKeyBindings;
+static bool bindingsInitialized = false;
+
+// User key binding support
+struct UserKeyBinding {
+  linenoiseUserKeyCallback callback;
+  void* userData;
+};
+static std::unordered_map<int, UserKeyBinding> userKeyBindings;
+static linenoiseUserKeyCallback globalUserKeyCallback = NULL;
+
+void initDefaultBindings() {
+  if (bindingsInitialized) return;
+  // Movement
+  defaultKeyBindings[ctrlChar('A')] = &InputBuffer::handleMoveToStart;
+  defaultKeyBindings[HOME_KEY] = &InputBuffer::handleMoveToStart;
+  defaultKeyBindings[ctrlChar('B')] = &InputBuffer::handleMoveLeft;
+  defaultKeyBindings[LEFT_ARROW_KEY] = &InputBuffer::handleMoveLeft;
+  defaultKeyBindings[META + 'b'] = &InputBuffer::handleMoveWordLeft;
+  defaultKeyBindings[META + 'B'] = &InputBuffer::handleMoveWordLeft;
+  defaultKeyBindings[CTRL + LEFT_ARROW_KEY] = &InputBuffer::handleMoveWordLeft;
+  defaultKeyBindings[META + LEFT_ARROW_KEY] = &InputBuffer::handleMoveWordLeft;
+  defaultKeyBindings[ctrlChar('E')] = &InputBuffer::handleMoveToEnd;
+  defaultKeyBindings[END_KEY] = &InputBuffer::handleMoveToEnd;
+  defaultKeyBindings[ctrlChar('F')] = &InputBuffer::handleMoveRight;
+  defaultKeyBindings[RIGHT_ARROW_KEY] = &InputBuffer::handleMoveRight;
+  defaultKeyBindings[META + 'f'] = &InputBuffer::handleMoveWordRight;
+  defaultKeyBindings[META + 'F'] = &InputBuffer::handleMoveWordRight;
+  defaultKeyBindings[CTRL + RIGHT_ARROW_KEY] = &InputBuffer::handleMoveWordRight;
+  defaultKeyBindings[META + RIGHT_ARROW_KEY] = &InputBuffer::handleMoveWordRight;
+  // Editing
+  defaultKeyBindings[ctrlChar('C')] = &InputBuffer::handleAbort;
+  defaultKeyBindings[META + 'c'] = &InputBuffer::handleCapitalizeWord;
+  defaultKeyBindings[META + 'C'] = &InputBuffer::handleCapitalizeWord;
+  defaultKeyBindings[ctrlChar('D')] = &InputBuffer::handleDeleteOrExit;
+  defaultKeyBindings[ctrlChar('H')] = &InputBuffer::handleBackspace;
+  defaultKeyBindings[ctrlChar('J')] = &InputBuffer::handleAcceptLine;
+  defaultKeyBindings[ctrlChar('M')] = &InputBuffer::handleAcceptLine;
+  defaultKeyBindings[ctrlChar('L')] = &InputBuffer::handleClearScreenCmd;
+  defaultKeyBindings[ctrlChar('T')] = &InputBuffer::handleTranspose;
+  defaultKeyBindings[127] = &InputBuffer::handleDelete;
+  defaultKeyBindings[DELETE_KEY] = &InputBuffer::handleDelete;
+  defaultKeyBindings[INSERT_KEY] = &InputBuffer::handleInsertToggle;
+  defaultKeyBindings[BRACKETED_PASTE_START] = &InputBuffer::handleBracketedPaste;
+  // Kill and yank
+  defaultKeyBindings[META + 'd'] = &InputBuffer::handleKillWordRight;
+  defaultKeyBindings[META + 'D'] = &InputBuffer::handleKillWordRight;
+  defaultKeyBindings[META + ctrlChar('H')] = &InputBuffer::handleKillWordLeft;
+  defaultKeyBindings[ctrlChar('K')] = &InputBuffer::handleKillToEnd;
+  defaultKeyBindings[ctrlChar('U')] = &InputBuffer::handleKillToStart;
+  defaultKeyBindings[ctrlChar('W')] = &InputBuffer::handleKillToWhitespace;
+  defaultKeyBindings[ctrlChar('Y')] = &InputBuffer::handleYank;
+  defaultKeyBindings[META + 'y'] = &InputBuffer::handleYankPop;
+  defaultKeyBindings[META + 'Y'] = &InputBuffer::handleYankPop;
+  // Word case
+  defaultKeyBindings[META + 'l'] = &InputBuffer::handleLowercaseWord;
+  defaultKeyBindings[META + 'L'] = &InputBuffer::handleLowercaseWord;
+  defaultKeyBindings[META + 'u'] = &InputBuffer::handleUppercaseWord;
+  defaultKeyBindings[META + 'U'] = &InputBuffer::handleUppercaseWord;
+  // History
+  defaultKeyBindings[ctrlChar('N')] = &InputBuffer::handleHistoryNavigate;
+  defaultKeyBindings[ctrlChar('P')] = &InputBuffer::handleHistoryNavigate;
+  defaultKeyBindings[DOWN_ARROW_KEY] = &InputBuffer::handleHistoryNavigate;
+  defaultKeyBindings[UP_ARROW_KEY] = &InputBuffer::handleHistoryNavigate;
+  defaultKeyBindings[ctrlChar('R')] = &InputBuffer::handleHistorySearch;
+  defaultKeyBindings[ctrlChar('S')] = &InputBuffer::handleHistorySearch;
+  defaultKeyBindings[META + '<'] = &InputBuffer::handleHistoryJump;
+  defaultKeyBindings[PAGE_UP_KEY] = &InputBuffer::handleHistoryJump;
+  defaultKeyBindings[META + '>'] = &InputBuffer::handleHistoryJump;
+  defaultKeyBindings[PAGE_DOWN_KEY] = &InputBuffer::handleHistoryJump;
+  // Undo
+  defaultKeyBindings[ctrlChar('_')] = &InputBuffer::handleUndo;
+  // Macros
+  defaultKeyBindings[ctrlChar('X')] = &InputBuffer::handleMacro;
+  // Special
+  defaultKeyBindings[TIMEOUT_KEY] = &InputBuffer::handleTimeout;
+#ifndef _WIN32
+  defaultKeyBindings[ctrlChar('Z')] = &InputBuffer::handleSuspend;
+#endif
+  bindingsInitialized = true;
+}
+
+// --- Key handler implementations ---
+
+int InputBuffer::handleTimeout(PromptBase& pi, KillRing& killRing, int c) {
+  --historyLen;
+  free(history[historyLen]);
+  return -1;
+}
+
+int InputBuffer::handleMoveToStart(PromptBase& pi, KillRing& killRing, int c) {
+  killRing.lastAction = KillRing::actionOther;
+  pos = 0;
+  refreshLine(pi);
+  return 0;
+}
+
+int InputBuffer::handleMoveLeft(PromptBase& pi, KillRing& killRing, int c) {
+  killRing.lastAction = KillRing::actionOther;
+  if (pos > 0) {
+    --pos;
+    refreshLine(pi);
+  }
+  return 0;
+}
+
+int InputBuffer::handleMoveWordLeft(PromptBase& pi, KillRing& killRing, int c) {
+  killRing.lastAction = KillRing::actionOther;
+  if (pos > 0) {
+    while (pos > 0 && !isCharacterAlphanumeric(buf32[pos - 1])) {
+      --pos;
+    }
+    while (pos > 0 && isCharacterAlphanumeric(buf32[pos - 1])) {
+      --pos;
+    }
+    refreshLine(pi);
+  }
+  return 0;
+}
+
+int InputBuffer::handleAbort(PromptBase& pi, KillRing& killRing, int c) {
+  killRing.lastAction = KillRing::actionOther;
+  historyRecallMostRecent = false;
+  errno = EAGAIN;
+  --historyLen;
+  free(history[historyLen]);
+  // we need one last refresh with the cursor at the end of the line
+  // so we don't display the next prompt over the previous input line
+  pos = len;  // pass len as pos for EOL
+  refreshLine(pi);
+  if (write(1, "^C", 2) == -1) return -1;  // Display the ^C we got
+  return -1;
+}
+
+int InputBuffer::handleCapitalizeWord(PromptBase& pi, KillRing& killRing, int c) {
+  killRing.lastAction = KillRing::actionOther;
+  historyRecallMostRecent = false;
+  undoStack.save(buf32, len, pos);
+  if (pos < len) {
+    while (pos < len && !isCharacterAlphanumeric(buf32[pos])) {
+      ++pos;
+    }
+    if (pos < len && isCharacterAlphanumeric(buf32[pos])) {
+      if (buf32[pos] >= 'a' && buf32[pos] <= 'z') {
+        buf32[pos] += 'A' - 'a';
+      }
+      ++pos;
+    }
+    while (pos < len && isCharacterAlphanumeric(buf32[pos])) {
+      if (buf32[pos] >= 'A' && buf32[pos] <= 'Z') {
+        buf32[pos] += 'a' - 'A';
+      }
+      ++pos;
+    }
+    refreshLine(pi);
+  }
+  return 0;
+}
+
+int InputBuffer::handleDeleteOrExit(PromptBase& pi, KillRing& killRing, int c) {
+  killRing.lastAction = KillRing::actionOther;
+  if (len > 0 && pos < len) {
+    historyRecallMostRecent = false;
+    undoStack.save(buf32, len, pos);
+    memmove(buf32 + pos, buf32 + pos + 1, sizeof(char32_t) * (len - pos));
+    --len;
+    refreshLine(pi);
+  } else if (len == 0) {
+    --historyLen;
+    free(history[historyLen]);
+    return -1;
+  }
+  return 0;
+}
+
+int InputBuffer::handleKillWordRight(PromptBase& pi, KillRing& killRing, int c) {
+  if (pos < len) {
+    historyRecallMostRecent = false;
+    undoStack.save(buf32, len, pos);
+    int endingPos = pos;
+    while (endingPos < len && !isCharacterAlphanumeric(buf32[endingPos])) {
+      ++endingPos;
+    }
+    while (endingPos < len && isCharacterAlphanumeric(buf32[endingPos])) {
+      ++endingPos;
+    }
+    killRing.kill(&buf32[pos], endingPos - pos, true);
+    memmove(buf32 + pos, buf32 + endingPos,
+            sizeof(char32_t) * (len - endingPos + 1));
+    len -= endingPos - pos;
+    refreshLine(pi);
+  }
+  killRing.lastAction = KillRing::actionKill;
+  return 0;
+}
+
+int InputBuffer::handleMoveToEnd(PromptBase& pi, KillRing& killRing, int c) {
+  killRing.lastAction = KillRing::actionOther;
+  pos = len;
+  refreshLine(pi);
+  return 0;
+}
+
+int InputBuffer::handleMoveRight(PromptBase& pi, KillRing& killRing, int c) {
+  killRing.lastAction = KillRing::actionOther;
+  if (pos < len) {
+    ++pos;
+    refreshLine(pi);
+  }
+  return 0;
+}
+
+int InputBuffer::handleMoveWordRight(PromptBase& pi, KillRing& killRing, int c) {
+  killRing.lastAction = KillRing::actionOther;
+  if (pos < len) {
+    while (pos < len && !isCharacterAlphanumeric(buf32[pos])) {
+      ++pos;
+    }
+    while (pos < len && isCharacterAlphanumeric(buf32[pos])) {
+      ++pos;
+    }
+    refreshLine(pi);
+  }
+  return 0;
+}
+
+int InputBuffer::handleBackspace(PromptBase& pi, KillRing& killRing, int c) {
+  killRing.lastAction = KillRing::actionOther;
+  if (pos > 0) {
+    historyRecallMostRecent = false;
+    undoStack.save(buf32, len, pos);
+    memmove(buf32 + pos - 1, buf32 + pos,
+            sizeof(char32_t) * (1 + len - pos));
+    --pos;
+    --len;
+    refreshLine(pi);
+  }
+  return 0;
+}
+
+int InputBuffer::handleKillWordLeft(PromptBase& pi, KillRing& killRing, int c) {
+  if (pos > 0) {
+    historyRecallMostRecent = false;
+    undoStack.save(buf32, len, pos);
+    int startingPos = pos;
+    while (pos > 0 && !isCharacterAlphanumeric(buf32[pos - 1])) {
+      --pos;
+    }
+    while (pos > 0 && isCharacterAlphanumeric(buf32[pos - 1])) {
+      --pos;
+    }
+    killRing.kill(&buf32[pos], startingPos - pos, false);
+    memmove(buf32 + pos, buf32 + startingPos,
+            sizeof(char32_t) * (len - startingPos + 1));
+    len -= startingPos - pos;
+    refreshLine(pi);
+  }
+  killRing.lastAction = KillRing::actionKill;
+  return 0;
+}
+
+int InputBuffer::handleAcceptLine(PromptBase& pi, KillRing& killRing, int c) {
+  killRing.lastAction = KillRing::actionOther;
+  // we need one last refresh with the cursor at the end of the line
+  // so we don't display the next prompt over the previous input line
+  pos = len;  // pass len as pos for EOL
+  refreshLine(pi);
+  historyPreviousIndex = historyRecallMostRecent ? historyIndex : -2;
+  --historyLen;
+  free(history[historyLen]);
+  return 1;  // accept line
+}
+
+int InputBuffer::handleKillToEnd(PromptBase& pi, KillRing& killRing, int c) {
+  undoStack.save(buf32, len, pos);
+  killRing.kill(&buf32[pos], len - pos, true);
+  buf32[pos] = '\0';
+  len = pos;
+  refreshLine(pi);
+  killRing.lastAction = KillRing::actionKill;
+  historyRecallMostRecent = false;
+  return 0;
+}
+
+int InputBuffer::handleClearScreenCmd(PromptBase& pi, KillRing& killRing, int c) {
+  clearScreen(pi);
+  return 0;
+}
+
+int InputBuffer::handleLowercaseWord(PromptBase& pi, KillRing& killRing, int c) {
+  killRing.lastAction = KillRing::actionOther;
+  if (pos < len) {
+    historyRecallMostRecent = false;
+    undoStack.save(buf32, len, pos);
+    while (pos < len && !isCharacterAlphanumeric(buf32[pos])) {
+      ++pos;
+    }
+    while (pos < len && isCharacterAlphanumeric(buf32[pos])) {
+      if (buf32[pos] >= 'A' && buf32[pos] <= 'Z') {
+        buf32[pos] += 'a' - 'A';
+      }
+      ++pos;
+    }
+    refreshLine(pi);
+  }
+  return 0;
+}
+
+int InputBuffer::handleHistoryNavigate(PromptBase& pi, KillRing& killRing, int c) {
+  killRing.lastAction = KillRing::actionOther;
+  // if not already recalling, add the current line to the history list so
+  // we don't have to special case it
+  if (historyIndex == historyLen - 1) {
+    free(history[historyLen - 1]);
+    size_t tempBufferSize = sizeof(char32_t) * len + 1;
+    unique_ptr<char[]> tempBuffer(new char[tempBufferSize]);
+    copyString32to8(tempBuffer.get(), tempBufferSize, buf32);
+    history[historyLen - 1] = strdup8(tempBuffer.get());
+  }
+  if (historyLen > 1) {
+    if (c == UP_ARROW_KEY) {
+      c = ctrlChar('P');
+    }
+    if (historyPreviousIndex != -2 && c != ctrlChar('P')) {
+      historyIndex =
+          1 + historyPreviousIndex;  // emulate Windows down-arrow
+    } else {
+      historyIndex += (c == ctrlChar('P')) ? -1 : 1;
+    }
+    historyPreviousIndex = -2;
+    if (historyIndex < 0) {
+      historyIndex = 0;
+      return 0;
+    } else if (historyIndex >= historyLen) {
+      historyIndex = historyLen - 1;
+      return 0;
+    }
+    historyRecallMostRecent = true;
+    size_t ucharCount = 0;
+    copyString8to32(buf32, buflen, ucharCount, history[historyIndex]);
+    len = pos = static_cast<int>(ucharCount);
+    refreshLine(pi);
+  }
+  return 0;
+}
+
+int InputBuffer::handleHistorySearch(PromptBase& pi, KillRing& killRing, int c) {
+  terminatingKeystroke = incrementalHistorySearch(pi, c);
+  return 0;
+}
+
+int InputBuffer::handleTranspose(PromptBase& pi, KillRing& killRing, int c) {
+  killRing.lastAction = KillRing::actionOther;
+  if (pos > 0 && len > 1) {
+    historyRecallMostRecent = false;
+    undoStack.save(buf32, len, pos);
+    size_t leftCharPos = (pos == len) ? pos - 2 : pos - 1;
+    char32_t aux = buf32[leftCharPos];
+    buf32[leftCharPos] = buf32[leftCharPos + 1];
+    buf32[leftCharPos + 1] = aux;
+    if (pos != len) ++pos;
+    refreshLine(pi);
+  }
+  return 0;
+}
+
+int InputBuffer::handleKillToStart(PromptBase& pi, KillRing& killRing, int c) {
+  if (pos > 0) {
+    historyRecallMostRecent = false;
+    undoStack.save(buf32, len, pos);
+    killRing.kill(&buf32[0], pos, false);
+    len -= pos;
+    memmove(buf32, buf32 + pos, sizeof(char32_t) * (len + 1));
+    pos = 0;
+    refreshLine(pi);
+  }
+  killRing.lastAction = KillRing::actionKill;
+  return 0;
+}
+
+int InputBuffer::handleUppercaseWord(PromptBase& pi, KillRing& killRing, int c) {
+  killRing.lastAction = KillRing::actionOther;
+  if (pos < len) {
+    historyRecallMostRecent = false;
+    undoStack.save(buf32, len, pos);
+    while (pos < len && !isCharacterAlphanumeric(buf32[pos])) {
+      ++pos;
+    }
+    while (pos < len && isCharacterAlphanumeric(buf32[pos])) {
+      if (buf32[pos] >= 'a' && buf32[pos] <= 'z') {
+        buf32[pos] += 'A' - 'a';
+      }
+      ++pos;
+    }
+    refreshLine(pi);
+  }
+  return 0;
+}
+
+int InputBuffer::handleKillToWhitespace(PromptBase& pi, KillRing& killRing, int c) {
+  if (pos > 0) {
+    historyRecallMostRecent = false;
+    undoStack.save(buf32, len, pos);
+    int startingPos = pos;
+    while (pos > 0 && buf32[pos - 1] == ' ') {
+      --pos;
+    }
+    while (pos > 0 && buf32[pos - 1] != ' ') {
+      --pos;
+    }
+    killRing.kill(&buf32[pos], startingPos - pos, false);
+    memmove(buf32 + pos, buf32 + startingPos,
+            sizeof(char32_t) * (len - startingPos + 1));
+    len -= startingPos - pos;
+    refreshLine(pi);
+  }
+  killRing.lastAction = KillRing::actionKill;
+  return 0;
+}
+
+int InputBuffer::handleYank(PromptBase& pi, KillRing& killRing, int c) {
+  historyRecallMostRecent = false;
+  undoStack.save(buf32, len, pos);
+  {
+    Utf32String* restoredText = killRing.yank();
+    if (restoredText) {
+      bool truncated = false;
+      size_t ucharCount = restoredText->length();
+      if (ucharCount > static_cast<size_t>(buflen - len)) {
+        ucharCount = buflen - len;
+        truncated = true;
+      }
+      memmove(buf32 + pos + ucharCount, buf32 + pos,
+              sizeof(char32_t) * (len - pos + 1));
+      memmove(buf32 + pos, restoredText->get(),
+              sizeof(char32_t) * ucharCount);
+      pos += static_cast<int>(ucharCount);
+      len += static_cast<int>(ucharCount);
+      refreshLine(pi);
+      killRing.lastAction = KillRing::actionYank;
+      killRing.lastYankSize = ucharCount;
+      if (truncated) {
+        beep();
+      }
+    } else {
+      beep();
+    }
+  }
+  return 0;
+}
+
+int InputBuffer::handleYankPop(PromptBase& pi, KillRing& killRing, int c) {
+  if (killRing.lastAction == KillRing::actionYank) {
+    historyRecallMostRecent = false;
+    undoStack.save(buf32, len, pos);
+    Utf32String* restoredText = killRing.yankPop();
+    if (restoredText) {
+      bool truncated = false;
+      size_t ucharCount = restoredText->length();
+      if (ucharCount >
+          static_cast<size_t>(killRing.lastYankSize + buflen - len)) {
+        ucharCount = killRing.lastYankSize + buflen - len;
+        truncated = true;
+      }
+      if (ucharCount > killRing.lastYankSize) {
+        memmove(buf32 + pos + ucharCount - killRing.lastYankSize,
+                buf32 + pos, sizeof(char32_t) * (len - pos + 1));
+        memmove(buf32 + pos - killRing.lastYankSize, restoredText->get(),
+                sizeof(char32_t) * ucharCount);
+      } else {
+        memmove(buf32 + pos - killRing.lastYankSize, restoredText->get(),
+                sizeof(char32_t) * ucharCount);
+        memmove(buf32 + pos + ucharCount - killRing.lastYankSize,
+                buf32 + pos, sizeof(char32_t) * (len - pos + 1));
+      }
+      pos += static_cast<int>(ucharCount - killRing.lastYankSize);
+      len += static_cast<int>(ucharCount - killRing.lastYankSize);
+      killRing.lastYankSize = ucharCount;
+      refreshLine(pi);
+      if (truncated) {
+        beep();
+      }
+      return 0;
+    }
+  }
+  beep();
+  return 0;
+}
+
+int InputBuffer::handleUndo(PromptBase& pi, KillRing& killRing, int c) {
+  killRing.lastAction = KillRing::actionOther;
+  undoStack.breakCoalescing();
+  if (undoStack.undo(buf32, buflen, len, pos)) {
+    refreshLine(pi);
+  } else {
+    beep();
+  }
+  return 0;
+}
+
+int InputBuffer::handleSuspend(PromptBase& pi, KillRing& killRing, int c) {
+#ifndef _WIN32
+  disableRawMode();  // Returning to Linux (whatever) shell, leave raw mode
+  raise(SIGSTOP);    // Break out in mid-line
+  enableRawMode();   // Back from Linux shell, re-enter raw mode
+  if (!pi.write()) return -1;  // Redraw prompt failed
+  refreshLine(pi);              // Refresh the line
+#endif
+  return 0;
+}
+
+int InputBuffer::handleDelete(PromptBase& pi, KillRing& killRing, int c) {
+  killRing.lastAction = KillRing::actionOther;
+  if (len > 0 && pos < len) {
+    historyRecallMostRecent = false;
+    undoStack.save(buf32, len, pos);
+    memmove(buf32 + pos, buf32 + pos + 1, sizeof(char32_t) * (len - pos));
+    --len;
+    refreshLine(pi);
+  }
+  return 0;
+}
+
+int InputBuffer::handleInsertToggle(PromptBase& pi, KillRing& killRing, int c) {
+  killRing.lastAction = KillRing::actionOther;
+  insertMode = !insertMode;
+#ifndef _WIN32
+  // change cursor shape: bar for insert, block for overwrite
+  if (insertMode) {
+    if (write(1, "\x1b[5 q", 5) == -1) return -1;  // blinking bar
+  } else {
+    if (write(1, "\x1b[2 q", 5) == -1) return -1;  // steady block
+  }
+#endif
+  return 0;
+}
+
+int InputBuffer::handleBracketedPaste(PromptBase& pi, KillRing& killRing, int c) {
+  killRing.lastAction = KillRing::actionOther;
+  historyRecallMostRecent = false;
+  undoStack.save(buf32, len, pos);
+  // Read and insert characters until paste end (ESC [ 2 0 1 ~)
+  while (true) {
+    char32_t pc = readUnicodeCharacter();
+    if (pc == 0) break;
+    if (pc == 0x1B) {  // ESC - check for paste end sequence: ESC [ 2 0 1 ~
+      // Buffer consumed chars so we can insert them if it's not paste-end
+      char32_t consumed[5];
+      int nConsumed = 0;
+      bool pasteEnd = false;
+      char32_t p1 = readUnicodeCharacter();
+      if (p1 == 0) break;
+      consumed[nConsumed++] = p1;
+      if (p1 == '[') {
+        char32_t p2 = readUnicodeCharacter();
+        if (p2 == 0) break;
+        consumed[nConsumed++] = p2;
+        if (p2 == '2') {
+          char32_t p3 = readUnicodeCharacter();
+          if (p3 == 0) break;
+          consumed[nConsumed++] = p3;
+          if (p3 == '0') {
+            char32_t p4 = readUnicodeCharacter();
+            if (p4 == 0) break;
+            consumed[nConsumed++] = p4;
+            if (p4 == '1') {
+              char32_t p5 = readUnicodeCharacter();
+              if (p5 == 0) break;
+              consumed[nConsumed++] = p5;
+              if (p5 == '~') {
+                pasteEnd = true;
+              }
+            }
+          }
+        }
+      }
+      if (pasteEnd) {
+        break;
+      }
+      // Not a paste end sequence; insert the consumed printable chars
+      for (int ci = 0; ci < nConsumed; ++ci) {
+        char32_t ch = consumed[ci];
+        if (!isControlChar(ch) && len < buflen) {
+          if (len == pos) {
+            buf32[pos] = ch;
+            ++pos;
+            ++len;
+            buf32[len] = '\0';
+          } else {
+            memmove(buf32 + pos + 1, buf32 + pos,
+                    sizeof(char32_t) * (len - pos));
+            buf32[pos] = ch;
+            ++len;
+            ++pos;
+            buf32[len] = '\0';
+          }
+        }
+      }
+      continue;
+    }
+    // Insert character into buffer (skip control chars except tab)
+    if (isControlChar(pc) && pc != '\t') {
+      continue;
+    }
+    if (len < buflen) {
+      if (len == pos) {
+        buf32[pos] = pc;
+        ++pos;
+        ++len;
+        buf32[len] = '\0';
+      } else {
+        memmove(buf32 + pos + 1, buf32 + pos,
+                sizeof(char32_t) * (len - pos));
+        buf32[pos] = pc;
+        ++len;
+        ++pos;
+        buf32[len] = '\0';
+      }
+    }
+  }
+  recomputeCharacterWidths(buf32, charWidths, len);
+  refreshLine(pi);
+  return 0;
+}
+
+int InputBuffer::handleHistoryJump(PromptBase& pi, KillRing& killRing, int c) {
+  killRing.lastAction = KillRing::actionOther;
+  // if not already recalling, add the current line to the history list so
+  // we don't have to special case it
+  if (historyIndex == historyLen - 1) {
+    free(history[historyLen - 1]);
+    size_t tempBufferSize = sizeof(char32_t) * len + 1;
+    unique_ptr<char[]> tempBuffer(new char[tempBufferSize]);
+    copyString32to8(tempBuffer.get(), tempBufferSize, buf32);
+    history[historyLen - 1] = strdup8(tempBuffer.get());
+  }
+  if (historyLen > 1) {
+    historyIndex =
+        (c == META + '<' || c == PAGE_UP_KEY) ? 0 : historyLen - 1;
+    historyPreviousIndex = -2;
+    historyRecallMostRecent = true;
+    size_t ucharCount = 0;
+    copyString8to32(buf32, buflen, ucharCount, history[historyIndex]);
+    len = pos = static_cast<int>(ucharCount);
+    refreshLine(pi);
+  }
+  return 0;
+}
+
+int InputBuffer::handleMacro(PromptBase& pi, KillRing& killRing, int c) {
+  killRing.lastAction = KillRing::actionOther;
+  // Read the next character to determine macro sub-command
+  c = linenoiseReadChar();
+  if (c <= 0) {
+    return 0;
+  }
+  if (c == '(' || c == ')' || c == 'e' || c == 'E') {
+    // These are macro control keys — not recorded
+  } else {
+    beep();
+    return 0;
+  }
+  if (c == '(') {
+    // Start recording
+    macroRecorder.startRecording();
+  } else if (c == ')') {
+    // Stop recording
+    macroRecorder.stopRecording();
+  } else if (c == 'e' || c == 'E') {
+    // Execute macro: push recorded keystrokes onto pending queue
+    const std::vector<int>& macro = macroRecorder.getMacro();
+    if (!macro.empty()) {
+      pendingKeystrokes.insert(pendingKeystrokes.end(), macro.begin(), macro.end());
+    }
+  }
+  return 0;
+}
+
 int InputBuffer::getInputLine(PromptBase& pi) {
   keyType = 0;
+  insertMode = true;  // always start in insert mode
+  undoStack.clear();
 
   // The latest history entry is always our current buffer
   if (len > 0) {
@@ -2572,7 +3718,10 @@ int InputBuffer::getInputLine(PromptBase& pi) {
 
   // when history search returns control to us, we execute its terminating
   // keystroke
-  int terminatingKeystroke = -1;
+  terminatingKeystroke = -1;
+
+  // initialize dispatch table on first use
+  initDefaultBindings();
 
   // if there is already text in the buffer, display it first
   if (len > 0) {
@@ -2583,12 +3732,20 @@ int InputBuffer::getInputLine(PromptBase& pi) {
   while (true) {
     int c;
     if (terminatingKeystroke == -1) {
-      c = linenoiseReadChar();  // get a new keystroke
+      // Check pending keystrokes from macro replay first
+      if (!pendingKeystrokes.empty()) {
+        c = pendingKeystrokes.front();
+        pendingKeystrokes.erase(pendingKeystrokes.begin());
+      } else {
+        c = linenoiseReadChar();  // get a new keystroke
+      }
 
       keyType = 0;
       if (c != 0) {
         // set flag that we got some input
-        if (c == ctrlChar('C')) {
+        if (c == TIMEOUT_KEY) {
+          keyType = 3;
+        } else if (c == ctrlChar('C')) {
           keyType = 1;
         } else if (c == ctrlChar('D')) {
           keyType = 2;
@@ -2628,8 +3785,13 @@ int InputBuffer::getInputLine(PromptBase& pi) {
       continue;
     }
 
+    // Record keystroke for macro (skip the macro chord key itself)
+    if (macroRecorder.isRecording() && c != ctrlChar('X')) {
+      macroRecorder.addKeystroke(c);
+    }
+
     // ctrl-I/tab, command completion, needs to be before switch statement
-    if (c == ctrlChar('I') && completionCallback) {
+    if (c == ctrlChar('I') && (completionCallback || filenameCompletionEnabled)) {
       if (pos == 0)  // SERVER-4967 -- in earlier versions, you could paste
                      // previous output
         continue;    //  back into the shell ... this output may have leading
@@ -2652,467 +3814,60 @@ int InputBuffer::getInputLine(PromptBase& pi) {
       // deliberate fall-through here, so we use the terminating character
     }
 
-    switch (c) {
-      case ctrlChar('A'):  // ctrl-A, move cursor to start of line
-      case HOME_KEY:
-        killRing.lastAction = KillRing::actionOther;
-        pos = 0;
-        refreshLine(pi);
-        break;
-
-      case ctrlChar('B'):  // ctrl-B, move cursor left by one character
-      case LEFT_ARROW_KEY:
-        killRing.lastAction = KillRing::actionOther;
-        if (pos > 0) {
-          --pos;
-          refreshLine(pi);
+    // Check user key bindings first (they take priority)
+    auto uit = userKeyBindings.find(c);
+    if (uit != userKeyBindings.end()) {
+      killRing.lastAction = KillRing::actionOther;
+      historyRecallMostRecent = false;
+      // Convert current buffer to UTF-8 for the callback
+      size_t cbBuf8Size = sizeof(char32_t) * len + 1;
+      unique_ptr<char[]> cbBuf8(new char[cbBuf8Size]);
+      copyString32to8(cbBuf8.get(), cbBuf8Size, buf32);
+      char* newLine = NULL;
+      int newPos = pos;
+      uit->second.callback(cbBuf8.get(), pos, &newLine, &newPos, uit->second.userData);
+      if (newLine) {
+        // Convert UTF-8 result back to char32_t
+        size_t ucharCount = 0;
+        copyString8to32(buf32, buflen + 1, ucharCount, newLine);
+        len = static_cast<int>(ucharCount);
+        free(newLine);
+        recomputeCharacterWidths(buf32, charWidths, len);
+      }
+      if (newPos >= 0 && newPos <= len) {
+        pos = newPos;
+      }
+      refreshLine(pi);
+    } else {
+      // Look up handler in default dispatch table
+      auto it = defaultKeyBindings.find(c);
+      if (it != defaultKeyBindings.end()) {
+        int rv = (this->*(it->second))(pi, killRing, c);
+        if (rv != 0) {
+          return rv > 0 ? len : -1;
         }
-        break;
-
-      case META + 'b':  // meta-B, move cursor left by one word
-      case META + 'B':
-      case CTRL + LEFT_ARROW_KEY:
-      case META + LEFT_ARROW_KEY:  // Emacs allows Meta, bash & readline don't
-        killRing.lastAction = KillRing::actionOther;
-        if (pos > 0) {
-          while (pos > 0 && !isCharacterAlphanumeric(buf32[pos - 1])) {
-            --pos;
-          }
-          while (pos > 0 && isCharacterAlphanumeric(buf32[pos - 1])) {
-            --pos;
-          }
-          refreshLine(pi);
-        }
-        break;
-
-      case ctrlChar('C'):  // ctrl-C, abort this line
-        killRing.lastAction = KillRing::actionOther;
-        historyRecallMostRecent = false;
-        errno = EAGAIN;
-        --historyLen;
-        free(history[historyLen]);
-        // we need one last refresh with the cursor at the end of the line
-        // so we don't display the next prompt over the previous input line
-        pos = len;  // pass len as pos for EOL
-        refreshLine(pi);
-        if (write(1, "^C", 2) == -1) return -1;  // Display the ^C we got
-        return -1;
-
-      case META + 'c':  // meta-C, give word initial Cap
-      case META + 'C':
-        killRing.lastAction = KillRing::actionOther;
-        historyRecallMostRecent = false;
-        if (pos < len) {
-          while (pos < len && !isCharacterAlphanumeric(buf32[pos])) {
-            ++pos;
-          }
-          if (pos < len && isCharacterAlphanumeric(buf32[pos])) {
-            if (buf32[pos] >= 'a' && buf32[pos] <= 'z') {
-              buf32[pos] += 'A' - 'a';
-            }
-            ++pos;
-          }
-          while (pos < len && isCharacterAlphanumeric(buf32[pos])) {
-            if (buf32[pos] >= 'A' && buf32[pos] <= 'Z') {
-              buf32[pos] += 'a' - 'A';
-            }
-            ++pos;
-          }
-          refreshLine(pi);
-        }
-        break;
-
-      // ctrl-D, delete the character under the cursor
-      // on an empty line, exit the shell
-      case ctrlChar('D'):
-        killRing.lastAction = KillRing::actionOther;
-        if (len > 0 && pos < len) {
-          historyRecallMostRecent = false;
-          memmove(buf32 + pos, buf32 + pos + 1, sizeof(char32_t) * (len - pos));
-          --len;
-          refreshLine(pi);
-        } else if (len == 0) {
-          --historyLen;
-          free(history[historyLen]);
-          return -1;
-        }
-        break;
-
-      case META + 'd':  // meta-D, kill word to right of cursor
-      case META + 'D':
-        if (pos < len) {
-          historyRecallMostRecent = false;
-          int endingPos = pos;
-          while (endingPos < len &&
-                 !isCharacterAlphanumeric(buf32[endingPos])) {
-            ++endingPos;
-          }
-          while (endingPos < len && isCharacterAlphanumeric(buf32[endingPos])) {
-            ++endingPos;
-          }
-          killRing.kill(&buf32[pos], endingPos - pos, true);
-          memmove(buf32 + pos, buf32 + endingPos,
-                  sizeof(char32_t) * (len - endingPos + 1));
-          len -= endingPos - pos;
-          refreshLine(pi);
-        }
-        killRing.lastAction = KillRing::actionKill;
-        break;
-
-      case ctrlChar('E'):  // ctrl-E, move cursor to end of line
-      case END_KEY:
-        killRing.lastAction = KillRing::actionOther;
-        pos = len;
-        refreshLine(pi);
-        break;
-
-      case ctrlChar('F'):  // ctrl-F, move cursor right by one character
-      case RIGHT_ARROW_KEY:
-        killRing.lastAction = KillRing::actionOther;
-        if (pos < len) {
-          ++pos;
-          refreshLine(pi);
-        }
-        break;
-
-      case META + 'f':  // meta-F, move cursor right by one word
-      case META + 'F':
-      case CTRL + RIGHT_ARROW_KEY:
-      case META + RIGHT_ARROW_KEY:  // Emacs allows Meta, bash & readline don't
-        killRing.lastAction = KillRing::actionOther;
-        if (pos < len) {
-          while (pos < len && !isCharacterAlphanumeric(buf32[pos])) {
-            ++pos;
-          }
-          while (pos < len && isCharacterAlphanumeric(buf32[pos])) {
-            ++pos;
-          }
-          refreshLine(pi);
-        }
-        break;
-
-      case ctrlChar('H'):  // backspace/ctrl-H, delete char to left of cursor
-        killRing.lastAction = KillRing::actionOther;
-        if (pos > 0) {
-          historyRecallMostRecent = false;
-          memmove(buf32 + pos - 1, buf32 + pos,
-                  sizeof(char32_t) * (1 + len - pos));
-          --pos;
-          --len;
-          refreshLine(pi);
-        }
-        break;
-
-      // meta-Backspace, kill word to left of cursor
-      case META + ctrlChar('H'):
-        if (pos > 0) {
-          historyRecallMostRecent = false;
-          int startingPos = pos;
-          while (pos > 0 && !isCharacterAlphanumeric(buf32[pos - 1])) {
-            --pos;
-          }
-          while (pos > 0 && isCharacterAlphanumeric(buf32[pos - 1])) {
-            --pos;
-          }
-          killRing.kill(&buf32[pos], startingPos - pos, false);
-          memmove(buf32 + pos, buf32 + startingPos,
-                  sizeof(char32_t) * (len - startingPos + 1));
-          len -= startingPos - pos;
-          refreshLine(pi);
-        }
-        killRing.lastAction = KillRing::actionKill;
-        break;
-
-      case ctrlChar('J'):  // ctrl-J/linefeed/newline, accept line
-      case ctrlChar('M'):  // ctrl-M/return/enter
-        killRing.lastAction = KillRing::actionOther;
-        // we need one last refresh with the cursor at the end of the line
-        // so we don't display the next prompt over the previous input line
-        pos = len;  // pass len as pos for EOL
-        refreshLine(pi);
-        historyPreviousIndex = historyRecallMostRecent ? historyIndex : -2;
-        --historyLen;
-        free(history[historyLen]);
-        return len;
-
-      case ctrlChar('K'):  // ctrl-K, kill from cursor to end of line
-        killRing.kill(&buf32[pos], len - pos, true);
-        buf32[pos] = '\0';
-        len = pos;
-        refreshLine(pi);
-        killRing.lastAction = KillRing::actionKill;
-        historyRecallMostRecent = false;
-        break;
-
-      case ctrlChar('L'):  // ctrl-L, clear screen and redisplay line
-        clearScreen(pi);
-        break;
-
-      case META + 'l':  // meta-L, lowercase word
-      case META + 'L':
-        killRing.lastAction = KillRing::actionOther;
-        if (pos < len) {
-          historyRecallMostRecent = false;
-          while (pos < len && !isCharacterAlphanumeric(buf32[pos])) {
-            ++pos;
-          }
-          while (pos < len && isCharacterAlphanumeric(buf32[pos])) {
-            if (buf32[pos] >= 'A' && buf32[pos] <= 'Z') {
-              buf32[pos] += 'a' - 'A';
-            }
-            ++pos;
-          }
-          refreshLine(pi);
-        }
-        break;
-
-      case ctrlChar('N'):  // ctrl-N, recall next line in history
-      case ctrlChar('P'):  // ctrl-P, recall previous line in history
-      case DOWN_ARROW_KEY:
-      case UP_ARROW_KEY:
-        killRing.lastAction = KillRing::actionOther;
-        // if not already recalling, add the current line to the history list so
-        // we don't
-        // have to special case it
-        if (historyIndex == historyLen - 1) {
-          free(history[historyLen - 1]);
-          size_t tempBufferSize = sizeof(char32_t) * len + 1;
-          unique_ptr<char[]> tempBuffer(new char[tempBufferSize]);
-          copyString32to8(tempBuffer.get(), tempBufferSize, buf32);
-          history[historyLen - 1] = strdup8(tempBuffer.get());
-        }
-        if (historyLen > 1) {
-          if (c == UP_ARROW_KEY) {
-            c = ctrlChar('P');
-          }
-          if (historyPreviousIndex != -2 && c != ctrlChar('P')) {
-            historyIndex =
-                1 + historyPreviousIndex;  // emulate Windows down-arrow
-          } else {
-            historyIndex += (c == ctrlChar('P')) ? -1 : 1;
-          }
-          historyPreviousIndex = -2;
-          if (historyIndex < 0) {
-            historyIndex = 0;
-            break;
-          } else if (historyIndex >= historyLen) {
-            historyIndex = historyLen - 1;
-            break;
-          }
-          historyRecallMostRecent = true;
-          size_t ucharCount = 0;
-          copyString8to32(buf32, buflen, ucharCount, history[historyIndex]);
-          len = pos = static_cast<int>(ucharCount);
-          refreshLine(pi);
-        }
-        break;
-
-      case ctrlChar('R'):  // ctrl-R, reverse history search
-      case ctrlChar('S'):  // ctrl-S, forward history search
-        terminatingKeystroke = incrementalHistorySearch(pi, c);
-        break;
-
-      case ctrlChar('T'):  // ctrl-T, transpose characters
-        killRing.lastAction = KillRing::actionOther;
-        if (pos > 0 && len > 1) {
-          historyRecallMostRecent = false;
-          size_t leftCharPos = (pos == len) ? pos - 2 : pos - 1;
-          char32_t aux = buf32[leftCharPos];
-          buf32[leftCharPos] = buf32[leftCharPos + 1];
-          buf32[leftCharPos + 1] = aux;
-          if (pos != len) ++pos;
-          refreshLine(pi);
-        }
-        break;
-
-      case ctrlChar(
-          'U'):  // ctrl-U, kill all characters to the left of the cursor
-        if (pos > 0) {
-          historyRecallMostRecent = false;
-          killRing.kill(&buf32[0], pos, false);
-          len -= pos;
-          memmove(buf32, buf32 + pos, sizeof(char32_t) * (len + 1));
-          pos = 0;
-          refreshLine(pi);
-        }
-        killRing.lastAction = KillRing::actionKill;
-        break;
-
-      case META + 'u':  // meta-U, uppercase word
-      case META + 'U':
-        killRing.lastAction = KillRing::actionOther;
-        if (pos < len) {
-          historyRecallMostRecent = false;
-          while (pos < len && !isCharacterAlphanumeric(buf32[pos])) {
-            ++pos;
-          }
-          while (pos < len && isCharacterAlphanumeric(buf32[pos])) {
-            if (buf32[pos] >= 'a' && buf32[pos] <= 'z') {
-              buf32[pos] += 'A' - 'a';
-            }
-            ++pos;
-          }
-          refreshLine(pi);
-        }
-        break;
-
-      // ctrl-W, kill to whitespace (not word) to left of cursor
-      case ctrlChar('W'):
-        if (pos > 0) {
-          historyRecallMostRecent = false;
-          int startingPos = pos;
-          while (pos > 0 && buf32[pos - 1] == ' ') {
-            --pos;
-          }
-          while (pos > 0 && buf32[pos - 1] != ' ') {
-            --pos;
-          }
-          killRing.kill(&buf32[pos], startingPos - pos, false);
-          memmove(buf32 + pos, buf32 + startingPos,
-                  sizeof(char32_t) * (len - startingPos + 1));
-          len -= startingPos - pos;
-          refreshLine(pi);
-        }
-        killRing.lastAction = KillRing::actionKill;
-        break;
-
-      case ctrlChar('Y'):  // ctrl-Y, yank killed text
-        historyRecallMostRecent = false;
-        {
-          Utf32String* restoredText = killRing.yank();
-          if (restoredText) {
-            bool truncated = false;
-            size_t ucharCount = restoredText->length();
-            if (ucharCount > static_cast<size_t>(buflen - len)) {
-              ucharCount = buflen - len;
-              truncated = true;
-            }
-            memmove(buf32 + pos + ucharCount, buf32 + pos,
-                    sizeof(char32_t) * (len - pos + 1));
-            memmove(buf32 + pos, restoredText->get(),
-                    sizeof(char32_t) * ucharCount);
-            pos += static_cast<int>(ucharCount);
-            len += static_cast<int>(ucharCount);
-            refreshLine(pi);
-            killRing.lastAction = KillRing::actionYank;
-            killRing.lastYankSize = ucharCount;
-            if (truncated) {
-              beep();
-            }
-          } else {
-            beep();
-          }
-        }
-        break;
-
-      case META + 'y':  // meta-Y, "yank-pop", rotate popped text
-      case META + 'Y':
-        if (killRing.lastAction == KillRing::actionYank) {
-          historyRecallMostRecent = false;
-          Utf32String* restoredText = killRing.yankPop();
-          if (restoredText) {
-            bool truncated = false;
-            size_t ucharCount = restoredText->length();
-            if (ucharCount >
-                static_cast<size_t>(killRing.lastYankSize + buflen - len)) {
-              ucharCount = killRing.lastYankSize + buflen - len;
-              truncated = true;
-            }
-            if (ucharCount > killRing.lastYankSize) {
-              memmove(buf32 + pos + ucharCount - killRing.lastYankSize,
-                      buf32 + pos, sizeof(char32_t) * (len - pos + 1));
-              memmove(buf32 + pos - killRing.lastYankSize, restoredText->get(),
-                      sizeof(char32_t) * ucharCount);
-            } else {
-              memmove(buf32 + pos - killRing.lastYankSize, restoredText->get(),
-                      sizeof(char32_t) * ucharCount);
-              memmove(buf32 + pos + ucharCount - killRing.lastYankSize,
-                      buf32 + pos, sizeof(char32_t) * (len - pos + 1));
-            }
-            pos += static_cast<int>(ucharCount - killRing.lastYankSize);
-            len += static_cast<int>(ucharCount - killRing.lastYankSize);
-            killRing.lastYankSize = ucharCount;
-            refreshLine(pi);
-            if (truncated) {
-              beep();
-            }
-            break;
-          }
-        }
-        beep();
-        break;
-
-#ifndef _WIN32
-      case ctrlChar('Z'):  // ctrl-Z, job control
-        disableRawMode();  // Returning to Linux (whatever) shell, leave raw
-                           // mode
-        raise(SIGSTOP);    // Break out in mid-line
-        enableRawMode();   // Back from Linux shell, re-enter raw mode
-        if (!pi.write()) break;  // Redraw prompt
-        refreshLine(pi);         // Refresh the line
-        break;
-#endif
-
-      // DEL, delete the character under the cursor
-      case 127:
-      case DELETE_KEY:
-        killRing.lastAction = KillRing::actionOther;
-        if (len > 0 && pos < len) {
-          historyRecallMostRecent = false;
-          memmove(buf32 + pos, buf32 + pos + 1, sizeof(char32_t) * (len - pos));
-          --len;
-          refreshLine(pi);
-        }
-        break;
-
-      case META + '<':     // meta-<, beginning of history
-      case PAGE_UP_KEY:    // Page Up, beginning of history
-      case META + '>':     // meta->, end of history
-      case PAGE_DOWN_KEY:  // Page Down, end of history
-        killRing.lastAction = KillRing::actionOther;
-        // if not already recalling, add the current line to the history list so
-        // we don't
-        // have to special case it
-        if (historyIndex == historyLen - 1) {
-          free(history[historyLen - 1]);
-          size_t tempBufferSize = sizeof(char32_t) * len + 1;
-          unique_ptr<char[]> tempBuffer(new char[tempBufferSize]);
-          copyString32to8(tempBuffer.get(), tempBufferSize, buf32);
-          history[historyLen - 1] = strdup8(tempBuffer.get());
-        }
-        if (historyLen > 1) {
-          historyIndex =
-              (c == META + '<' || c == PAGE_UP_KEY) ? 0 : historyLen - 1;
-          historyPreviousIndex = -2;
-          historyRecallMostRecent = true;
-          size_t ucharCount = 0;
-          copyString8to32(buf32, buflen, ucharCount, history[historyIndex]);
-          len = pos = static_cast<int>(ucharCount);
-          refreshLine(pi);
-        }
-        break;
-
-      // not one of our special characters, maybe insert it in the buffer
-      default:
+      } else {
+        // default: self-insert printable characters
         killRing.lastAction = KillRing::actionOther;
         historyRecallMostRecent = false;
         if (c & (META | CTRL)) {  // beep on unknown Ctrl and/or Meta keys
           beep();
-          break;
+          continue;
         }
+        undoStack.save(buf32, len, pos, true);  // coalesce consecutive inserts
         bool didDedent = tryAutoDedent(c);
         if (len < buflen) {
           if (isControlChar(c)) {  // don't insert control characters
             beep();
-            break;
+            continue;
           }
-          if (len == pos) {  // at end of buffer
+          if (len == pos) {  // at end of buffer (insert in both modes)
             buf32[pos] = c;
             ++pos;
             ++len;
             buf32[len] = '\0';
-            if (didDedent) {
-              // dedent changed the buffer; must redraw entire line
+            if (maskMode || didDedent) {
+              // mask mode or dedent changed the buffer; must redraw entire line
               refreshLine(pi);
             } else {
               int inputLen = calculateColumnPosition(buf32, len);
@@ -3127,8 +3882,11 @@ int InputBuffer::getInputLine(PromptBase& pi) {
                 refreshLine(pi);
               }
             }
-          } else {  // not at end of buffer, have to move characters to our
-                    // right
+          } else if (!insertMode) {  // overwrite mode: replace char in place
+            buf32[pos] = c;
+            ++pos;
+            refreshLine(pi);
+          } else {  // insert mode, not at end of buffer: move chars to our right
             memmove(buf32 + pos + 1, buf32 + pos,
                     sizeof(char32_t) * (len - pos));
             buf32[pos] = c;
@@ -3140,7 +3898,7 @@ int InputBuffer::getInputLine(PromptBase& pi) {
         } else {
           beep();  // buffer is full, beep on new characters
         }
-        break;
+      }
     }
   }
   return len;
@@ -3367,6 +4125,35 @@ void linenoiseSetFreeHintsCallback(linenoiseFreeHintsCallback* fn) {
   freeHintsCallback = fn;
 }
 
+void linenoiseSetSyntaxCallback(linenoiseSyntaxCallback* fn) {
+  syntaxCallback = fn;
+}
+
+void linenoiseSetRightPrompt(const char* prompt) {
+  if (prompt) {
+    rightPromptText = prompt;
+  } else {
+    rightPromptText.clear();
+  }
+}
+
+void linenoiseSetUserKeyCallback(linenoiseUserKeyCallback cb) {
+  globalUserKeyCallback = cb;
+}
+
+void linenoiseBindKey(int keyCode, void* userData) {
+  if (globalUserKeyCallback) {
+    UserKeyBinding binding;
+    binding.callback = globalUserKeyCallback;
+    binding.userData = userData;
+    userKeyBindings[keyCode] = binding;
+  }
+}
+
+void linenoiseUnbindKey(int keyCode) {
+  userKeyBindings.erase(keyCode);
+}
+
 void linenoiseAddCompletion(linenoiseCompletions* lc, const char* str) {
   lc->completionStrings.push_back(Utf32String(str));
 }
@@ -3431,9 +4218,13 @@ int linenoiseHistorySetMaxLen(int len) {
       return 0;
     }
     if (len < tocopy) {
+      // Free entries that will be dropped (the oldest ones)
+      for (int i = 0; i < historyLen - len; ++i) {
+        free(history[i]);
+      }
       tocopy = len;
     }
-    memcpy(newHistory, history + historyMaxLen - tocopy,
+    memcpy(newHistory, history + historyLen - tocopy,
            sizeof(char8_t*) * tocopy);
     free(history);
     history = newHistory;

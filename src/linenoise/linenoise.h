@@ -50,9 +50,13 @@ typedef struct linenoiseCompletions linenoiseCompletions;
 typedef void(linenoiseCompletionCallback)(const char*, linenoiseCompletions*);
 typedef char*(linenoiseHintsCallback)(const char *buf, int *color, int *bold);
 typedef void(linenoiseFreeHintsCallback)(void *hint);
+typedef char*(linenoiseSyntaxCallback)(const char* buf);
+typedef int (*linenoiseUserKeyCallback)(const char* line, int pos, char** new_line, int* new_pos, void* userData);
 void linenoiseSetCompletionCallback(linenoiseCompletionCallback* fn);
 void linenoiseSetHintsCallback(linenoiseHintsCallback* fn);
 void linenoiseSetFreeHintsCallback(linenoiseFreeHintsCallback* fn);
+void linenoiseSetSyntaxCallback(linenoiseSyntaxCallback* fn);
+void linenoiseSetRightPrompt(const char* prompt);
 void linenoiseAddCompletion(linenoiseCompletions* lc, const char* str);
 
 char* linenoise(const char* prompt);
@@ -65,12 +69,21 @@ int linenoiseHistorySave(const char* filename);
 int linenoiseHistoryLoad(const char* filename);
 void linenoiseHistoryFree(void);
 void linenoiseClearScreen(void);
+void linenoiseMaskModeEnable(void);
+void linenoiseMaskModeDisable(void);
+void linenoiseSetMenuComplete(int enable);
+void linenoiseSetCompletionCaseInsensitive(int ci);
+void linenoiseSetFilenameCompletion(int enable);
+void linenoiseSetReadTimeout(int ms);
 void linenoiseSetMultiLine(int ml);
 void linenoiseSetAutoDedent(const char* indentStr, char32_t dedentChar);
+void linenoiseSetUserKeyCallback(linenoiseUserKeyCallback cb);
+void linenoiseBindKey(int keyCode, void* userData);
+void linenoiseUnbindKey(int keyCode);
 void linenoisePrintKeyCodes(void);
 /* the following are extensions to the original linenoise API */
 int linenoiseInstallWindowChangeHandler(void);
-/* returns type of key pressed: 1 = CTRL-C, 2 = CTRL-D, 0 = other */
+/* returns type of key pressed: 1 = CTRL-C, 2 = CTRL-D, 3 = TIMEOUT, 0 = other */
 int linenoiseKeyType(void);
 /* returns the terminal width in columns */
 int linenoiseColumns(void);

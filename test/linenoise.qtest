@@ -58,9 +58,38 @@ class LinenoiseTest inherits Test {
         addTestCase("set_hints_callback() accepts function reference", \testSetHintsCallbackFuncRef());
         addTestCase("set_hints_callback() can be replaced", \testSetHintsCallbackReplace());
         addTestCase("set_hints_callback() hash return", \testSetHintsCallbackHash());
+        addTestCase("set_hints_callback() clear with NOTHING", \testSetHintsCallbackClear());
 
         # Preload buffer tests
         addTestCase("preload_buffer() basic", \testPreloadBufferBasic());
+
+        # Mask mode tests
+        addTestCase("set_mask_mode() enable and disable", \testSetMaskMode());
+        addTestCase("set_mask_mode() toggle multiple times", \testSetMaskModeToggle());
+
+        # Auto-dedent tests
+        addTestCase("set_auto_dedent() basic", \testSetAutoDedent());
+
+        # Completion enhancement tests
+        addTestCase("set_menu_complete() enable and disable", \testSetMenuComplete());
+        addTestCase("set_completion_case_insensitive() enable and disable", \testSetCompletionCaseInsensitive());
+        addTestCase("set_filename_completion() enable and disable", \testSetFilenameCompletion());
+
+        # Timeout tests
+        addTestCase("line_with_timeout() API callable", \testLineWithTimeoutApi());
+        addTestCase("line_with_timeout() rejects invalid timeout", \testLineWithTimeoutValidation());
+
+        # Syntax highlighting tests
+        addTestCase("set_syntax_callback() set, replace, and clear", \testSetSyntaxCallback());
+
+        # Right prompt tests
+        addTestCase("set_right_prompt() set and clear", \testSetRightPrompt());
+
+        # Key binding tests
+        addTestCase("bind_key() and unbind_key() basic", \testBindKey());
+        addTestCase("bind_key() replaces existing binding", \testBindKeyReplace());
+        addTestCase("bind_key() invalid key spec", \testBindKeyInvalidSpec());
+        addTestCase("unbind_key() invalid key spec", \testUnbindKeyInvalidSpec());
 
         # Negative tests
         addTestCase("history_set_max_len() rejects zero", \testSetMaxLenZero());
@@ -451,6 +480,17 @@ class LinenoiseTest inherits Test {
         assertNothing(Linenoise::set_hints_callback(callback));
     }
 
+    testSetHintsCallbackClear() {
+        resetHistory();
+        # Set a callback first
+        assertNothing(Linenoise::set_hints_callback(\dummyHintsCallback()));
+        # Clear it with NOTHING
+        assertNothing(Linenoise::set_hints_callback());
+        # Set and clear again to verify no double-free
+        assertNothing(Linenoise::set_hints_callback(\dummyHintsCallback()));
+        assertNothing(Linenoise::set_hints_callback());
+    }
+
     # ==================== Preload Buffer Tests ====================
 
     testPreloadBufferBasic() {
@@ -476,6 +516,89 @@ class LinenoiseTest inherits Test {
         # Calling preload_buffer multiple times (last one wins)
         assertNothing(Linenoise::preload_buffer("first"));
         assertNothing(Linenoise::preload_buffer("second"));
+    }
+
+    # ==================== Mask Mode Tests ====================
+
+    testSetMaskMode() {
+        resetHistory();
+        # Enable mask mode - should not throw
+        assertNothing(Linenoise::set_mask_mode(True));
+        # Disable mask mode - should not throw
+        assertNothing(Linenoise::set_mask_mode(False));
+    }
+
+    testSetMaskModeToggle() {
+        resetHistory();
+        # Toggle mask mode multiple times
+        assertNothing(Linenoise::set_mask_mode(True));
+        assertNothing(Linenoise::set_mask_mode(True));   # idempotent enable
+        assertNothing(Linenoise::set_mask_mode(False));
+        assertNothing(Linenoise::set_mask_mode(False));  # idempotent disable
+        assertNothing(Linenoise::set_mask_mode(True));
+        assertNothing(Linenoise::set_mask_mode(False));
+    }
+
+    # ==================== Auto-Dedent Tests ====================
+
+    testSetAutoDedent() {
+        resetHistory();
+        # Basic configuration
+        assertNothing(Linenoise::set_auto_dedent("    ", "}"));
+
+        # Reconfigure with different settings
+        assertNothing(Linenoise::set_auto_dedent("\t", ")"));
+
+        # Empty indent string (effectively disables)
+        assertNothing(Linenoise::set_auto_dedent("", "}"));
+
+        # Single-char indent
+        assertNothing(Linenoise::set_auto_dedent(" ", "]"));
+
+        # UTF-8 dedent character
+        assertNothing(Linenoise::set_auto_dedent("    ", "\u00bb"));
+    }
+
+    # ==================== Completion Enhancement Tests ====================
+
+    testSetMenuComplete() {
+        resetHistory();
+        assertNothing(Linenoise::set_menu_complete(True));
+        assertNothing(Linenoise::set_menu_complete(False));
+    }
+
+    testSetCompletionCaseInsensitive() {
+        resetHistory();
+        assertNothing(Linenoise::set_completion_case_insensitive(True));
+        assertNothing(Linenoise::set_completion_case_insensitive(False));
+    }
+
+    testSetFilenameCompletion() {
+        resetHistory();
+        assertNothing(Linenoise::set_filename_completion(True));
+        assertNothing(Linenoise::set_filename_completion(False));
+    }
+
+    # ==================== Timeout Tests ====================
+
+    testLineWithTimeoutApi() {
+        resetHistory();
+        # line_with_timeout() requires a TTY for actual line reading.
+        # Verify the function is accessible by getting a reference to it.
+        code ref = \Linenoise::line_with_timeout();
+        assertEq(Type::CallReference, ref.type());
+    }
+
+    testLineWithTimeoutValidation() {
+        resetHistory();
+        # Zero timeout should throw
+        assertThrows("LINENOISE-TIMEOUT-ERROR", sub () {
+            Linenoise::line_with_timeout("prompt> ", 0);
+        });
+        # Negative timeout should throw
+        assertThrows("LINENOISE-TIMEOUT-ERROR", sub () {
+            Linenoise::line_with_timeout("prompt> ", -1000);
+        });
     }
 
     # ==================== Negative Tests ====================
@@ -540,11 +663,117 @@ class LinenoiseTest inherits Test {
         list<auto> h = Linenoise::history();
         assertEq(10, h.size());
 
-        # Reduce max length - should truncate oldest entries
+        # Reduce max length - should truncate oldest entries, keep newest 5
         Linenoise::history_set_max_len(5);
         h = Linenoise::history();
-        # After truncation, should have last 5 entries
-        assertLe(5, h.size());
+        assertEq(5, h.size());
+        assertEq("line5", h[0]);
+        assertEq("line6", h[1]);
+        assertEq("line7", h[2]);
+        assertEq("line8", h[3]);
+        assertEq("line9", h[4]);
+
+        # Truncate to 1
+        Linenoise::history_set_max_len(1);
+        h = Linenoise::history();
+        assertEq(1, h.size());
+        assertEq("line9", h[0]);
+
+        # Expand max length - should not add phantom entries
+        Linenoise::history_set_max_len(100);
+        h = Linenoise::history();
+        assertEq(1, h.size());
+        assertEq("line9", h[0]);
+    }
+
+    testSetSyntaxCallback() {
+        # Set a syntax callback using external helper
+        assertNothing(Linenoise::set_syntax_callback(\dummySyntaxCallback()));
+
+        # Replace with a different callback
+        assertNothing(Linenoise::set_syntax_callback(\dummySyntaxCallback2()));
+
+        # Clear the callback with NOTHING
+        assertNothing(Linenoise::set_syntax_callback());
+    }
+
+    testBindKey() {
+        # Bind and unbind ctrl key
+        assertNothing(Linenoise::bind_key("ctrl-g", \dummyKeyBindingCallback()));
+        assertNothing(Linenoise::unbind_key("ctrl-g"));
+
+        # Meta key
+        assertNothing(Linenoise::bind_key("meta-d", \dummyKeyBindingCallback()));
+        assertNothing(Linenoise::unbind_key("meta-d"));
+
+        # Ctrl + special key
+        assertNothing(Linenoise::bind_key("ctrl-left", \dummyKeyBindingCallback()));
+        assertNothing(Linenoise::unbind_key("ctrl-left"));
+
+        # Alt alias for meta
+        assertNothing(Linenoise::bind_key("alt-f", \dummyKeyBindingCallback()));
+        assertNothing(Linenoise::unbind_key("alt-f"));
+
+        # Named special keys
+        assertNothing(Linenoise::bind_key("home", \dummyKeyBindingCallback()));
+        assertNothing(Linenoise::unbind_key("home"));
+
+        assertNothing(Linenoise::bind_key("delete", \dummyKeyBindingCallback()));
+        assertNothing(Linenoise::unbind_key("delete"));
+
+        assertNothing(Linenoise::bind_key("pageup", \dummyKeyBindingCallback()));
+        assertNothing(Linenoise::unbind_key("pageup"));
+
+        # Single character key
+        assertNothing(Linenoise::bind_key("x", \dummyKeyBindingCallback()));
+        assertNothing(Linenoise::unbind_key("x"));
+
+        # Unbinding a key that was never bound (should not throw)
+        assertNothing(Linenoise::unbind_key("ctrl-g"));
+    }
+
+    testBindKeyReplace() {
+        # Bind a key with one callback, then replace with another
+        assertNothing(Linenoise::bind_key("ctrl-g", \dummyKeyBindingCallback()));
+        # Replacing an existing binding should not throw or leak
+        assertNothing(Linenoise::bind_key("ctrl-g", \dummyKeyBindingCallback2()));
+        assertNothing(Linenoise::unbind_key("ctrl-g"));
+    }
+
+    testBindKeyInvalidSpec() {
+        # Invalid key spec should throw
+        assertThrows("LINENOISE-KEY-SPEC-ERROR", sub () {
+            Linenoise::bind_key("invalid-key-name", \dummyKeyBindingCallback());
+        });
+
+        # Multi-word invalid key
+        assertThrows("LINENOISE-KEY-SPEC-ERROR", sub () {
+            Linenoise::bind_key("ctrl-not-a-key", \dummyKeyBindingCallback());
+        });
+    }
+
+    testUnbindKeyInvalidSpec() {
+        # Invalid key spec should throw
+        assertThrows("LINENOISE-KEY-SPEC-ERROR", sub () {
+            Linenoise::unbind_key("invalid-key-name");
+        });
+    }
+
+    testSetRightPrompt() {
+        # Set a right prompt
+        assertNothing(Linenoise::set_right_prompt("[ins]"));
+
+        # Replace with different content
+        assertNothing(Linenoise::set_right_prompt("mode: normal"));
+
+        # UTF-8 content
+        assertNothing(Linenoise::set_right_prompt("\u2713 ok"));
+
+        # Clear by passing NOTHING
+        assertNothing(Linenoise::set_right_prompt());
+
+        # Clear by passing empty string
+        assertNothing(Linenoise::set_right_prompt(""));
     }
 
     testMultipleSaveLoadCycles() {
@@ -584,4 +813,25 @@ list<string> sub dummyCallback(string input) {
 # Helper function for hints callback tests
 *string sub dummyHintsCallback(string input) {
     return " hint text";
+}
+
+# Helper function for syntax callback tests
+string sub dummySyntaxCallback(string input) {
+    return "\x1b[31m" + input + "\x1b[0m";
+}
+
+# Helper function for syntax callback tests (alternate)
+string sub dummySyntaxCallback2(string input) {
+    return input;
+}
+
+# Helper function for key binding callback tests
+*hash<auto> sub dummyKeyBindingCallback(hash<auto> info) {
+    # Just return the same content unchanged
+    return info;
+}
+
+# Helper function for key binding callback tests (alternate)
+*hash<auto> sub dummyKeyBindingCallback2(hash<auto> info) {
+    return {"line": "replaced", "pos": 0};
 }

@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.5...3.31)
 project(qore-linenoise-module)
 
 set (VERSION_MAJOR 1)
-set (VERSION_MINOR 3)
+set (VERSION_MINOR 2)
 set (VERSION_PATCH 0)
 
 # where to look first for cmake modules, before ${CMAKE_ROOT}/Modules/ is checked

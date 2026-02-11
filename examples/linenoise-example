@@ -2,53 +2,198 @@
 
 %requires linenoise
 
-%new-style
-%require-types
-%strict-args
-%enable-all-warnings
+%modern
 
-Linenoise::history_set_max_len(10);
+Linenoise::history_set_max_len(100);
 
-# h<TAB> is expanded to string: history
-code my_callback = list<string> sub (string value) {
+# --- Completion callback ---
+# Demonstrates context-aware completion: the callback receives the full line
+# up to the cursor, so it can complete differently depending on context.
+const COMMANDS = ("help", "history", "quit", "password", "timeout", "syntax",
+                  "menu-complete", "file-complete", "right-prompt",
+                  "bind-key", "macro", "dedent");
+
+code my_callback = list<string> sub (string input) {
     list<string> ret = ();
-    if (value == 'h') {
-        ret += 'history';
-    } else if (value == 'q') {
-        ret += 'quit';
+    for (int i = 0; i < COMMANDS.size(); i++) {
+        if (COMMANDS[i].find(input) == 0) {
+            ret += COMMANDS[i];
+        }
     }
-
     return ret;
 };
-
 Linenoise::set_callback(my_callback);
 
-try {
-    Linenoise::history_load('history.txt');
-} catch (hash<ExceptionInfo> ex) {
-    printf("History is not loaded: %s: %s\n", ex.err, ex.desc);
+# --- Hints callback ---
+# Shows usage hints as grey text after the cursor
+Linenoise::set_hints_callback(auto sub (string input) {
+    switch (input) {
+        case "help":      return "  -- show available commands";
+        case "history":   return "  -- display command history";
+        case "quit":      return "  -- exit the example";
+        case "password":  return "  -- demonstrate mask (password) mode";
+        case "timeout":   return "  -- demonstrate input timeout (5s)";
+        case "syntax":    return " on|off  -- toggle syntax highlighting";
+        case "menu-complete": return " on|off  -- toggle menu-complete mode";
+        case "file-complete": return " on|off  -- toggle filename completion";
+        case "right-prompt":  return " [text]  -- set or clear right prompt";
+        case "bind-key":  return "  -- demonstrate custom key binding";
+        case "macro":     return "  -- show keyboard macro instructions";
+        case "dedent":    return "  -- demonstrate auto-dedent";
+    }
+});
+
+# --- Syntax highlighting callback ---
+# Simple keyword colorizer: commands in yellow, strings in green
+const KEYWORDS = ("if", "else", "while", "for", "return", "sub", "class", "my");
+
+string sub colorize(string input) {
+    string output = input;
+    for (int i = 0; i < KEYWORDS.size(); i++) {
+        output = regex_subst(output, "\\b" + KEYWORDS[i] + "\\b",
+                             "\x1b[1;33m" + KEYWORDS[i] + "\x1b[0m", RE_Global);
+    }
+    # Highlight strings in green
+    output = regex_subst(output, "\"[^\"]*\"", "\x1b[32m$&\x1b[0m", RE_Global);
+    output = regex_subst(output, "'[^']*'", "\x1b[32m$&\x1b[0m", RE_Global);
+    return output;
 }
+
+bool syntaxEnabled = False;
+
+# --- Load history ---
+try {
+    Linenoise::history_load("history.txt");
+} catch (hash<ExceptionInfo> ex) {
+    # Ignore missing history file on first run
+}
+
+printf("Linenoise Feature Demo (type 'help' for commands, Tab for completion)\n");
+printf("Terminal: %d columns x %d rows\n\n", Linenoise::columns(), Linenoise::rows());
 
 while (True) {
-    *string line = Linenoise::line("Example Prompt> ");
+    *string line = Linenoise::line("demo> ");
     if (!exists line) {
-        printf("^C signal caught. Exiting.\n");
+        printf("\n^C caught. Exiting.\n");
         break;
     }
 
-    if (line == 'quit') {
-        printf("exiting on user request\n");
-        break;
-    } else if (line == 'help' || line == '?') {
-        printf("commands:\n\thelp\n\tquit\n\thistory\n");
-        continue;
-    } else if (line == 'history' || line == 'h') {
-        printf("history:\n%N\n", Linenoise::history());
+    string trimmed = trim(line);
+    if (trimmed.empty()) {
         continue;
     }
 
-    Linenoise::history_add(line);
-    printf("OK, doing: '%s'\n", line);
+    Linenoise::history_add(trimmed);
+
+    if (trimmed == "quit" || trimmed == "exit") {
+        printf("Goodbye!\n");
+        break;
+    } else if (trimmed == "help" || trimmed == "?") {
+        printf("Available commands:\n");
+        printf("  help            - show this help\n");
+        printf("  history         - display command history\n");
+        printf("  password        - demonstrate mask (password) mode\n");
+        printf("  timeout         - demonstrate 5-second input timeout\n");
+        printf("  syntax on|off   - toggle syntax highlighting\n");
+        printf("  menu-complete on|off - toggle menu-complete mode\n");
+        printf("  file-complete on|off - toggle filename completion\n");
+        printf("  right-prompt [text]  - set or clear right prompt\n");
+        printf("  bind-key        - demonstrate custom key binding\n");
+        printf("  macro           - show keyboard macro instructions\n");
+        printf("  dedent          - demonstrate auto-dedent mode\n");
+        printf("  quit            - exit\n");
+        printf("\nKeyboard shortcuts: Ctrl+_ undo, Insert toggles overwrite mode\n");
+        printf("Kill ring: Ctrl+K/U/W cut, Ctrl+Y paste, Meta+Y cycle\n");
+        printf("Macros: Ctrl+X ( start recording, Ctrl+X ) stop, Ctrl+X e replay\n");
+    } else if (trimmed == "history" || trimmed == "h") {
+        list<auto> hist = Linenoise::history();
+        printf("History (%d entries):\n", hist.size());
+        for (int i = 0; i < hist.size(); i++) {
+            printf("  %3d: %s\n", i, hist[i]);
+        }
+    } else if (trimmed == "password") {
+        Linenoise::set_mask_mode(True);
+        *string pw = Linenoise::line("Password: ");
+        Linenoise::set_mask_mode(False);
+        if (exists pw) {
+            printf("You entered %d characters (hidden)\n", pw.length());
+        } else {
+            printf("Cancelled\n");
+        }
+    } else if (trimmed == "timeout") {
+        printf("You have 5 seconds to type something...\n");
+        try {
+            *string input = Linenoise::line_with_timeout("timed> ", 5000);
+            if (exists input) {
+                printf("You typed: %s\n", input);
+            } else {
+                printf("Cancelled\n");
+            }
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == "LINENOISE-TIMEOUT-ERROR") {
+                printf("\nTime's up!\n");
+            } else {
+                rethrow;
+            }
+        }
+    } else if (trimmed == "syntax on") {
+        Linenoise::set_syntax_callback(\colorize());
+        syntaxEnabled = True;
+        printf("Syntax highlighting enabled (try typing: if \"hello\" else return)\n");
+    } else if (trimmed == "syntax off") {
+        Linenoise::set_syntax_callback();
+        syntaxEnabled = False;
+        printf("Syntax highlighting disabled\n");
+    } else if (trimmed == "menu-complete on") {
+        Linenoise::set_menu_complete(True);
+        printf("Menu-complete enabled (Tab cycles through completions)\n");
+    } else if (trimmed == "menu-complete off") {
+        Linenoise::set_menu_complete(False);
+        printf("Menu-complete disabled (Tab shows completion list)\n");
+    } else if (trimmed == "file-complete on") {
+        Linenoise::set_filename_completion(True);
+        printf("Filename completion enabled (Tab completes file paths)\n");
+    } else if (trimmed == "file-complete off") {
+        Linenoise::set_filename_completion(False);
+        printf("Filename completion disabled\n");
+    } else if (trimmed =~ /^right-prompt\s+(.+)/) {
+        string text = trim($1);
+        Linenoise::set_right_prompt(text);
+        printf("Right prompt set to: %s\n", text);
+    } else if (trimmed == "right-prompt") {
+        Linenoise::set_right_prompt();
+        printf("Right prompt cleared\n");
+    } else if (trimmed == "bind-key") {
+        printf("Binding Ctrl+G to insert '[HELLO]' at cursor...\n");
+        Linenoise::bind_key("ctrl-g", *hash<auto> sub (hash<auto> info) {
+            string prefix = info.pos > 0 ? info.line[0..info.pos - 1] : "";
+            string newLine = prefix + "[HELLO]" + info.line[info.pos..];
+            return {"line": newLine, "pos": info.pos + 7};
+        });
+        printf("Press Ctrl+G while editing to insert [HELLO]. Type 'unbind' to remove.\n");
+    } else if (trimmed == "unbind") {
+        Linenoise::unbind_key("ctrl-g");
+        printf("Ctrl+G unbound\n");
+    } else if (trimmed == "macro") {
+        printf("Keyboard macro instructions:\n");
+        printf("  1. Press Ctrl+X ( to start recording\n");
+        printf("  2. Type any editing keystrokes\n");
+        printf("  3. Press Ctrl+X ) to stop recording\n");
+        printf("  4. Press Ctrl+X e to replay the macro\n");
+        printf("Try it: record typing 'hello', then replay it!\n");
+    } else if (trimmed == "dedent") {
+        Linenoise::set_auto_dedent("    ", "}");
+        printf("Auto-dedent configured: 4-space indent, '}' trigger\n");
+        printf("Try: use preload_buffer to simulate indentation, then type '}'\n");
+        Linenoise::preload_buffer("        ");
+        *string input = Linenoise::line("code> ");
+        if (exists input) {
+            printf("Result: '%s'\n", input);
+        }
+        Linenoise::set_auto_dedent("", "}");
+    } else {
+        printf("echo: %s\n", trimmed);
+    }
 }
 
-Linenoise::history_save('history.txt');
+Linenoise::history_save("history.txt");
