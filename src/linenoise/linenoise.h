@@ -52,6 +52,20 @@ typedef char*(linenoiseHintsCallback)(const char *buf, int *color, int *bold);
 typedef void(linenoiseFreeHintsCallback)(void *hint);
 typedef char*(linenoiseSyntaxCallback)(const char* buf);
 typedef int (*linenoiseUserKeyCallback)(const char* line, int pos, char** new_line, int* new_pos, void* userData);
+
+/* History provider callback types */
+typedef char* (*linenoiseHistoryProviderCallback)(const char* prefix, void* userData);
+typedef void  (*linenoiseHistoryResetCallback)(void* userData);
+typedef char* (*linenoiseHistorySearchCallback)(const char* pattern, int direction, void* userData);
+
+void linenoiseSetHistoryProvider(
+    linenoiseHistoryProviderCallback prevCb,
+    linenoiseHistoryProviderCallback nextCb,
+    linenoiseHistoryResetCallback resetCb,
+    linenoiseHistorySearchCallback searchCb,
+    void* userData
+);
+
 void linenoiseSetCompletionCallback(linenoiseCompletionCallback* fn);
 void linenoiseSetHintsCallback(linenoiseHintsCallback* fn);
 void linenoiseSetFreeHintsCallback(linenoiseFreeHintsCallback* fn);
@@ -89,6 +103,24 @@ int linenoiseKeyType(void);
 int linenoiseColumns(void);
 /* returns the terminal height in rows */
 int linenoiseRows(void);
+
+/* Async (non-blocking) line editing API */
+typedef struct linenoiseState linenoiseState;
+
+#define LN_FEED_MORE    0   /* need more input */
+#define LN_FEED_DONE    1   /* line accepted (Enter) */
+#define LN_FEED_ABORT  -1   /* aborted (Ctrl+C) */
+#define LN_FEED_EXIT   -2   /* exit (Ctrl+D on empty line) */
+#define LN_FEED_TIMEOUT -3  /* reserved for future use */
+
+linenoiseState* linenoiseEditStart(const char* prompt);
+int linenoiseEditFeed(linenoiseState* state, char c);
+char* linenoiseEditGetLine(linenoiseState* state);
+void linenoiseEditStop(linenoiseState* state);
+int linenoiseEditFd(linenoiseState* state);
+const char* linenoiseEditGetBuffer(linenoiseState* state, int* cursor_pos, int* len);
+void linenoiseEditSetSilent(linenoiseState* state, int silent);
+int linenoiseEditKeyType(linenoiseState* state);
 
 #ifdef __cplusplus
 }

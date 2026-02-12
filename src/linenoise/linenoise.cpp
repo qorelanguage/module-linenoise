@@ -1142,6 +1142,7 @@ static struct termios orig_termios; /* in order to restore at exit */
 static KillRing killRing;
 
 static int rawmode = 0; /* for atexit() function to check if restore is needed*/
+static int rawModeRefCount = 0; /* async session reference count for raw mode */
 static int atexit_registered = 0; /* register atexit just 1 time */
 static int historyMaxLen = LINENOISE_DEFAULT_HISTORY_MAX_LEN;
 static int historyLen = 0;
@@ -1154,6 +1155,19 @@ static char8_t** history = NULL;
 // and zero is a valid index (so -1 is a valid "previous index")
 static int historyPreviousIndex = -2;
 static bool historyRecallMostRecent = false;
+
+// History provider callback state
+static linenoiseHistoryProviderCallback historyPrevCallback = NULL;
+static linenoiseHistoryProviderCallback historyNextCallback = NULL;
+static linenoiseHistoryResetCallback historyResetCallback = NULL;
+static linenoiseHistorySearchCallback historySearchCallback = NULL;
+static void* historyProviderUserData = NULL;
+static std::string providerSavedLine;
+static bool providerNavigating = false;
+
+static inline bool hasHistoryProvider() {
+    return historyPrevCallback != NULL && historyNextCallback != NULL;
+}
 
 static void linenoiseAtExit(void);
 
@@ -2730,10 +2744,20 @@ int InputBuffer::incrementalHistorySearch(PromptBase& pi, int startChar) {
   size_t bufferSize;
   size_t ucharCount = 0;
 
+  // When using a history provider, we keep a local UTF-8 string for the
+  // "current line" instead of using the internal history array.
+  bool useProvider = hasHistoryProvider() && historySearchCallback;
+  std::string providerLine;
+
   // if not already recalling, add the current line to the history list so we
   // don't have to
   // special case it
-  if (historyIndex == historyLen - 1) {
+  if (useProvider) {
+    bufferSize = sizeof(char32_t) * len + 1;
+    unique_ptr<char[]> tempBuffer(new char[bufferSize]);
+    copyString32to8(tempBuffer.get(), bufferSize, buf32);
+    providerLine = tempBuffer.get();
+  } else if (historyIndex == historyLen - 1) {
     free(history[historyLen - 1]);
     bufferSize = sizeof(char32_t) * len + 1;
     unique_ptr<char[]> tempBuffer(new char[bufferSize]);
@@ -2847,8 +2871,13 @@ int InputBuffer::incrementalHistorySearch(PromptBase& pi, int startChar) {
         {
           bufferSize = historyLineLength + 1;
           unique_ptr<char32_t[]> tempUnicode(new char32_t[bufferSize]);
-          copyString8to32(tempUnicode.get(), bufferSize, ucharCount,
-                          history[historyIndex]);
+          if (useProvider) {
+            copyString8to32(tempUnicode.get(), bufferSize, ucharCount,
+                            providerLine.c_str());
+          } else {
+            copyString8to32(tempUnicode.get(), bufferSize, ucharCount,
+                            history[historyIndex]);
+          }
           dynamicRefresh(dp, tempUnicode.get(), historyLineLength,
                          historyLinePosition);
         }
@@ -2890,67 +2919,116 @@ int InputBuffer::incrementalHistorySearch(PromptBase& pi, int startChar) {
 
     // if we are staying in search mode, search now
     if (keepLooping) {
-      bufferSize = historyLineLength + 1;
-      if (activeHistoryLine) {
-        delete[] activeHistoryLine;
-        activeHistoryLine = nullptr;
-      }
-      activeHistoryLine = new char32_t[bufferSize];
-      copyString8to32(activeHistoryLine, bufferSize, ucharCount,
-                      history[historyIndex]);
-      if (dp.searchTextLen > 0) {
-        bool found = false;
-        int historySearchIndex = historyIndex;
-        int lineLength = static_cast<int>(ucharCount);
-        int lineSearchPos = historyLinePosition;
-        if (searchAgain) {
-          lineSearchPos += dp.direction;
-        }
-        searchAgain = false;
-        while (true) {
-          while ((dp.direction > 0) ? (lineSearchPos < lineLength)
-                                    : (lineSearchPos >= 0)) {
-            if (strncmp32(dp.searchText.get(),
-                          &activeHistoryLine[lineSearchPos],
-                          dp.searchTextLen) == 0) {
-              found = true;
-              break;
-            }
-            lineSearchPos += dp.direction;
-          }
-          if (found) {
-            historyIndex = historySearchIndex;
-            historyLineLength = lineLength;
-            historyLinePosition = lineSearchPos;
-            break;
-          } else if ((dp.direction > 0) ? (historySearchIndex < historyLen - 1)
-                                        : (historySearchIndex > 0)) {
-            historySearchIndex += dp.direction;
-            bufferSize = strlen8(history[historySearchIndex]) + 1;
-            delete[] activeHistoryLine;
-            activeHistoryLine = nullptr;
-            activeHistoryLine = new char32_t[bufferSize];
-            copyString8to32(activeHistoryLine, bufferSize, ucharCount,
-                            history[historySearchIndex]);
-            lineLength = static_cast<int>(ucharCount);
-            lineSearchPos =
-                (dp.direction > 0) ? 0 : (lineLength - dp.searchTextLen);
+      if (useProvider) {
+        // Provider search mode: delegate search to callback
+        bool matchFound = false;
+        if (dp.searchTextLen > 0) {
+          // Convert search text from char32_t to UTF-8
+          size_t searchBufSize = sizeof(char32_t) * dp.searchTextLen + 1;
+          unique_ptr<char[]> searchUtf8(new char[searchBufSize]);
+          copyString32to8(searchUtf8.get(), searchBufSize, dp.searchText.get());
+
+          char* match = historySearchCallback(
+              searchUtf8.get(), dp.direction, historyProviderUserData);
+          if (match) {
+            providerLine = match;
+            free(match);
+            matchFound = true;
           } else {
             beep();
-            break;
           }
-        };  // while
+        }
+        searchAgain = false;
+
+        // Single allocation for display
+        if (activeHistoryLine) {
+          delete[] activeHistoryLine;
+          activeHistoryLine = nullptr;
+        }
+        bufferSize = providerLine.size() + 1;
+        activeHistoryLine = new char32_t[bufferSize];
+        copyString8to32(activeHistoryLine, bufferSize, ucharCount,
+                        providerLine.c_str());
+        historyLineLength = static_cast<int>(ucharCount);
+
+        // Find match position for cursor placement
+        if (matchFound) {
+          historyLinePosition = 0;
+          for (int i = 0; i <= historyLineLength - static_cast<int>(dp.searchTextLen); ++i) {
+            if (strncmp32(dp.searchText.get(), &activeHistoryLine[i],
+                          dp.searchTextLen) == 0) {
+              historyLinePosition = i;
+              break;
+            }
+          }
+        }
+
+        dynamicRefresh(dp, activeHistoryLine, historyLineLength,
+                       historyLinePosition);
+      } else {
+        // Internal history search mode
+        bufferSize = historyLineLength + 1;
+        if (activeHistoryLine) {
+          delete[] activeHistoryLine;
+          activeHistoryLine = nullptr;
+        }
+        activeHistoryLine = new char32_t[bufferSize];
+        copyString8to32(activeHistoryLine, bufferSize, ucharCount,
+                        history[historyIndex]);
+        if (dp.searchTextLen > 0) {
+          bool found = false;
+          int historySearchIndex = historyIndex;
+          int lineLength = static_cast<int>(ucharCount);
+          int lineSearchPos = historyLinePosition;
+          if (searchAgain) {
+            lineSearchPos += dp.direction;
+          }
+          searchAgain = false;
+          while (true) {
+            while ((dp.direction > 0) ? (lineSearchPos < lineLength)
+                                      : (lineSearchPos >= 0)) {
+              if (strncmp32(dp.searchText.get(),
+                            &activeHistoryLine[lineSearchPos],
+                            dp.searchTextLen) == 0) {
+                found = true;
+                break;
+              }
+              lineSearchPos += dp.direction;
+            }
+            if (found) {
+              historyIndex = historySearchIndex;
+              historyLineLength = lineLength;
+              historyLinePosition = lineSearchPos;
+              break;
+            } else if ((dp.direction > 0) ? (historySearchIndex < historyLen - 1)
+                                          : (historySearchIndex > 0)) {
+              historySearchIndex += dp.direction;
+              bufferSize = strlen8(history[historySearchIndex]) + 1;
+              delete[] activeHistoryLine;
+              activeHistoryLine = nullptr;
+              activeHistoryLine = new char32_t[bufferSize];
+              copyString8to32(activeHistoryLine, bufferSize, ucharCount,
+                              history[historySearchIndex]);
+              lineLength = static_cast<int>(ucharCount);
+              lineSearchPos =
+                  (dp.direction > 0) ? 0 : (lineLength - dp.searchTextLen);
+            } else {
+              beep();
+              break;
+            }
+          };  // while
+        }
+        if (activeHistoryLine) {
+          delete[] activeHistoryLine;
+          activeHistoryLine = nullptr;
+        }
+        bufferSize = historyLineLength + 1;
+        activeHistoryLine = new char32_t[bufferSize];
+        copyString8to32(activeHistoryLine, bufferSize, ucharCount,
+                        history[historyIndex]);
+        dynamicRefresh(dp, activeHistoryLine, historyLineLength,
+                       historyLinePosition);  // draw user's text with our prompt
       }
-      if (activeHistoryLine) {
-        delete[] activeHistoryLine;
-        activeHistoryLine = nullptr;
-      }
-      bufferSize = historyLineLength + 1;
-      activeHistoryLine = new char32_t[bufferSize];
-      copyString8to32(activeHistoryLine, bufferSize, ucharCount,
-                      history[historyIndex]);
-      dynamicRefresh(dp, activeHistoryLine, historyLineLength,
-                     historyLinePosition);  // draw user's text with our prompt
     }
   }  // while
 
@@ -2981,6 +3059,14 @@ int InputBuffer::incrementalHistorySearch(PromptBase& pi, int startChar) {
   if (activeHistoryLine) {
     delete[] activeHistoryLine;
     activeHistoryLine = nullptr;
+  }
+  // Reset provider navigation state after search
+  if (useProvider) {
+    providerNavigating = false;
+    providerSavedLine.clear();
+    if (historyResetCallback) {
+      historyResetCallback(historyProviderUserData);
+    }
   }
   dynamicRefresh(pb, buf32, len,
                  pos);  // redraw the original prompt with current input
@@ -3091,8 +3177,10 @@ void initDefaultBindings() {
 // --- Key handler implementations ---
 
 int InputBuffer::handleTimeout(PromptBase& pi, KillRing& killRing, int c) {
-  --historyLen;
-  free(history[historyLen]);
+  if (!hasHistoryProvider()) {
+    --historyLen;
+    free(history[historyLen]);
+  }
   return -1;
 }
 
@@ -3130,8 +3218,10 @@ int InputBuffer::handleAbort(PromptBase& pi, KillRing& killRing, int c) {
   killRing.lastAction = KillRing::actionOther;
   historyRecallMostRecent = false;
   errno = EAGAIN;
-  --historyLen;
-  free(history[historyLen]);
+  if (!hasHistoryProvider()) {
+    --historyLen;
+    free(history[historyLen]);
+  }
   // we need one last refresh with the cursor at the end of the line
   // so we don't display the next prompt over the previous input line
   pos = len;  // pass len as pos for EOL
@@ -3174,8 +3264,10 @@ int InputBuffer::handleDeleteOrExit(PromptBase& pi, KillRing& killRing, int c) {
     --len;
     refreshLine(pi);
   } else if (len == 0) {
-    --historyLen;
-    free(history[historyLen]);
+    if (!hasHistoryProvider()) {
+      --historyLen;
+      free(history[historyLen]);
+    }
     return -1;
   }
   return 0;
@@ -3273,9 +3365,14 @@ int InputBuffer::handleAcceptLine(PromptBase& pi, KillRing& killRing, int c) {
   // so we don't display the next prompt over the previous input line
   pos = len;  // pass len as pos for EOL
   refreshLine(pi);
-  historyPreviousIndex = historyRecallMostRecent ? historyIndex : -2;
-  --historyLen;
-  free(history[historyLen]);
+  if (hasHistoryProvider()) {
+    providerNavigating = false;
+    providerSavedLine.clear();
+  } else {
+    historyPreviousIndex = historyRecallMostRecent ? historyIndex : -2;
+    --historyLen;
+    free(history[historyLen]);
+  }
   return 1;  // accept line
 }
 
@@ -3316,6 +3413,56 @@ int InputBuffer::handleLowercaseWord(PromptBase& pi, KillRing& killRing, int c) 
 
 int InputBuffer::handleHistoryNavigate(PromptBase& pi, KillRing& killRing, int c) {
   killRing.lastAction = KillRing::actionOther;
+
+  if (hasHistoryProvider()) {
+    // History provider mode
+    bool goingUp = (c == UP_ARROW_KEY || c == ctrlChar('P'));
+
+    if (goingUp) {
+      if (!providerNavigating) {
+        // Save current line before first navigation
+        size_t tempBufferSize = sizeof(char32_t) * len + 1;
+        unique_ptr<char[]> tempBuffer(new char[tempBufferSize]);
+        copyString32to8(tempBuffer.get(), tempBufferSize, buf32);
+        providerSavedLine = tempBuffer.get();
+        providerNavigating = true;
+      }
+      char* entry = historyPrevCallback(providerSavedLine.c_str(), historyProviderUserData);
+      if (entry) {
+        size_t ucharCount = 0;
+        copyString8to32(buf32, buflen, ucharCount, entry);
+        free(entry);
+        len = pos = static_cast<int>(ucharCount);
+        historyRecallMostRecent = true;
+        refreshLine(pi);
+      }
+      // If NULL, at oldest — do nothing
+    } else {
+      // Going down (newer)
+      if (providerNavigating) {
+        char* entry = historyNextCallback(providerSavedLine.c_str(), historyProviderUserData);
+        if (entry) {
+          size_t ucharCount = 0;
+          copyString8to32(buf32, buflen, ucharCount, entry);
+          free(entry);
+          len = pos = static_cast<int>(ucharCount);
+          historyRecallMostRecent = true;
+          refreshLine(pi);
+        } else {
+          // Back to current line
+          size_t ucharCount = 0;
+          copyString8to32(buf32, buflen, ucharCount, providerSavedLine.c_str());
+          len = pos = static_cast<int>(ucharCount);
+          providerNavigating = false;
+          historyRecallMostRecent = false;
+          refreshLine(pi);
+        }
+      }
+    }
+    return 0;
+  }
+
+  // Internal history mode
   // if not already recalling, add the current line to the history list so
   // we don't have to special case it
   if (historyIndex == historyLen - 1) {
@@ -3353,6 +3500,11 @@ int InputBuffer::handleHistoryNavigate(PromptBase& pi, KillRing& killRing, int c
 }
 
 int InputBuffer::handleHistorySearch(PromptBase& pi, KillRing& killRing, int c) {
+  if (hasHistoryProvider() && !historySearchCallback) {
+    // Provider set but no search callback
+    beep();
+    return 0;
+  }
   terminatingKeystroke = incrementalHistorySearch(pi, c);
   return 0;
 }
@@ -3633,6 +3785,13 @@ int InputBuffer::handleBracketedPaste(PromptBase& pi, KillRing& killRing, int c)
 
 int InputBuffer::handleHistoryJump(PromptBase& pi, KillRing& killRing, int c) {
   killRing.lastAction = KillRing::actionOther;
+
+  if (hasHistoryProvider()) {
+    // No jump-to-start/end concept in provider API
+    beep();
+    return 0;
+  }
+
   // if not already recalling, add the current line to the history list so
   // we don't have to special case it
   if (historyIndex == historyLen - 1) {
@@ -3690,15 +3849,23 @@ int InputBuffer::getInputLine(PromptBase& pi) {
   undoStack.clear();
 
   // The latest history entry is always our current buffer
-  if (len > 0) {
-    size_t bufferSize = sizeof(char32_t) * len + 1;
-    unique_ptr<char[]> tempBuffer(new char[bufferSize]);
-    copyString32to8(tempBuffer.get(), bufferSize, buf32);
-    linenoiseHistoryAdd(tempBuffer.get());
+  if (hasHistoryProvider()) {
+    if (historyResetCallback) {
+      historyResetCallback(historyProviderUserData);
+    }
+    providerNavigating = false;
+    providerSavedLine.clear();
   } else {
-    linenoiseHistoryAdd("");
+    if (len > 0) {
+      size_t bufferSize = sizeof(char32_t) * len + 1;
+      unique_ptr<char[]> tempBuffer(new char[bufferSize]);
+      copyString32to8(tempBuffer.get(), bufferSize, buf32);
+      linenoiseHistoryAdd(tempBuffer.get());
+    } else {
+      linenoiseHistoryAdd("");
+    }
+    historyIndex = historyLen - 1;
   }
-  historyIndex = historyLen - 1;
   historyRecallMostRecent = false;
 
   // display the prompt
@@ -3850,6 +4017,13 @@ int InputBuffer::getInputLine(PromptBase& pi) {
         // default: self-insert printable characters
         killRing.lastAction = KillRing::actionOther;
         historyRecallMostRecent = false;
+        if (providerNavigating) {
+          providerNavigating = false;
+          providerSavedLine.clear();
+          if (historyResetCallback) {
+            historyResetCallback(historyProviderUserData);
+          }
+        }
         if (c & (META | CTRL)) {  // beep on unknown Ctrl and/or Meta keys
           beep();
           continue;
@@ -4137,6 +4311,22 @@ void linenoiseSetRightPrompt(const char* prompt) {
   }
 }
 
+void linenoiseSetHistoryProvider(
+    linenoiseHistoryProviderCallback prevCb,
+    linenoiseHistoryProviderCallback nextCb,
+    linenoiseHistoryResetCallback resetCb,
+    linenoiseHistorySearchCallback searchCb,
+    void* userData
+) {
+  historyPrevCallback = prevCb;
+  historyNextCallback = nextCb;
+  historyResetCallback = resetCb;
+  historySearchCallback = searchCb;
+  historyProviderUserData = userData;
+  providerNavigating = false;
+  providerSavedLine.clear();
+}
+
 void linenoiseSetUserKeyCallback(linenoiseUserKeyCallback cb) {
   globalUserKeyCallback = cb;
 }
@@ -4375,4 +4565,572 @@ int linenoiseColumns(void) {
 
 int linenoiseRows(void) {
   return getScreenRows();
+}
+
+// ============================================================================
+// Async (non-blocking) line editing API
+// ============================================================================
+
+// Input state machine for async byte-by-byte processing
+enum AsyncInputMode {
+  ASYNC_NORMAL,    // Normal input
+  ASYNC_ESC,       // ESC received, waiting for next byte
+  ASYNC_ESC_SEQ,   // In escape sequence (escBuf being filled)
+  ASYNC_UTF8,      // Accumulating UTF-8 bytes
+};
+
+struct linenoiseState {
+  // Editing buffer
+  char32_t buf32[LINENOISE_MAX_LINE];
+  char charWidths[LINENOISE_MAX_LINE];
+  int len;
+  int pos;
+  bool insertMode;
+
+  // Terminal state
+  bool rawModeEnabled;
+  bool silent;
+
+  // Result tracking
+  int result;      // LN_FEED_MORE until resolved
+  int keyType;
+
+  // Input state machine
+  AsyncInputMode inputMode;
+
+  // UTF-8 byte accumulator
+  unsigned char utf8Buf[4];
+  int utf8Len;       // bytes accumulated so far
+  int utf8Expected;  // total bytes expected for current char
+
+  // Escape sequence accumulator
+  unsigned char escBuf[16];
+  int escLen;
+
+  // Prompt
+  std::string prompt;
+
+  // UTF-8 buffer cache for linenoiseEditGetBuffer
+  mutable std::string getBufferCache;
+  mutable bool getBufferCacheDirty;
+};
+
+// Determine how many bytes a UTF-8 leading byte expects
+static int utf8ExpectedBytes(unsigned char c) {
+  if ((c & 0x80) == 0) return 1;       // 0xxxxxxx — ASCII
+  if ((c & 0xE0) == 0xC0) return 2;    // 110xxxxx
+  if ((c & 0xF0) == 0xE0) return 3;    // 1110xxxx
+  if ((c & 0xF8) == 0xF0) return 4;    // 11110xxx
+  return 1;  // invalid leading byte — treat as single byte
+}
+
+// Decode accumulated UTF-8 bytes into a char32_t
+static char32_t utf8Decode(const unsigned char* buf, int len) {
+  if (len == 1) return buf[0];
+  if (len == 2) {
+    return ((buf[0] & 0x1F) << 6) | (buf[1] & 0x3F);
+  }
+  if (len == 3) {
+    return ((buf[0] & 0x0F) << 12) | ((buf[1] & 0x3F) << 6) | (buf[2] & 0x3F);
+  }
+  if (len == 4) {
+    return ((buf[0] & 0x07) << 18) | ((buf[1] & 0x3F) << 12) |
+           ((buf[2] & 0x3F) << 6) | (buf[3] & 0x3F);
+  }
+  return 0;
+}
+
+// Simple terminal refresh for async state
+static void asyncRefreshLine(linenoiseState* state) {
+  if (state->silent) return;
+  // \r moves to start of line, ESC[K clears to end
+  std::string output = "\r\x1b[K";
+  output += state->prompt;
+  // Convert buffer to UTF-8 for display
+  size_t bufSize = sizeof(char32_t) * state->len + 1;
+  unique_ptr<char[]> utf8(new char[bufSize]);
+  copyString32to8(utf8.get(), bufSize, state->buf32);
+  output += utf8.get();
+  // Position cursor: move back (len - pos) columns
+  if (state->pos < state->len) {
+    // Calculate column distance from pos to end
+    int cols = 0;
+    for (int i = state->pos; i < state->len; ++i) {
+      cols += state->charWidths[i] ? state->charWidths[i] : 1;
+    }
+    if (cols > 0) {
+      char moveBuf[32];
+      snprintf(moveBuf, sizeof(moveBuf), "\x1b[%dD", cols);
+      output += moveBuf;
+    }
+  }
+  if (write(1, output.c_str(), output.size()) == -1) {
+    // write error — ignore in async mode
+  }
+}
+
+// Process a decoded character in the async editing state
+static int asyncProcessChar(linenoiseState* state, char32_t c) {
+  // Handle Enter
+  if (c == '\r' || c == '\n') {
+    // Move cursor to end for clean display
+    state->pos = state->len;
+    asyncRefreshLine(state);
+    state->result = LN_FEED_DONE;
+    state->keyType = 0;
+    return LN_FEED_DONE;
+  }
+
+  // Handle Ctrl+C — abort
+  if (c == 3) {
+    state->pos = state->len;
+    asyncRefreshLine(state);
+    if (!state->silent) {
+      if (write(1, "^C", 2) == -1) {
+        // ignore
+      }
+    }
+    state->result = LN_FEED_ABORT;
+    state->keyType = 1;
+    return LN_FEED_ABORT;
+  }
+
+  // Handle Ctrl+D — exit on empty, delete otherwise
+  if (c == 4) {
+    if (state->len == 0) {
+      state->result = LN_FEED_EXIT;
+      state->keyType = 2;
+      return LN_FEED_EXIT;
+    }
+    // Delete char under cursor
+    if (state->pos < state->len) {
+      memmove(state->buf32 + state->pos, state->buf32 + state->pos + 1,
+              sizeof(char32_t) * (state->len - state->pos));
+      --state->len;
+      state->buf32[state->len] = '\0';
+      recomputeCharacterWidths(state->buf32, state->charWidths, state->len);
+      state->getBufferCacheDirty = true;
+      asyncRefreshLine(state);
+    }
+    return LN_FEED_MORE;
+  }
+
+  // Handle Backspace (Ctrl+H or 127)
+  if (c == 8 || c == 127) {
+    if (state->pos > 0) {
+      memmove(state->buf32 + state->pos - 1, state->buf32 + state->pos,
+              sizeof(char32_t) * (state->len - state->pos + 1));
+      --state->pos;
+      --state->len;
+      recomputeCharacterWidths(state->buf32, state->charWidths, state->len);
+      state->getBufferCacheDirty = true;
+      asyncRefreshLine(state);
+    }
+    return LN_FEED_MORE;
+  }
+
+  // Handle Ctrl+A — move to start
+  if (c == 1) {
+    if (state->pos > 0) {
+      state->pos = 0;
+      asyncRefreshLine(state);
+    }
+    return LN_FEED_MORE;
+  }
+
+  // Handle Ctrl+E — move to end
+  if (c == 5) {
+    if (state->pos < state->len) {
+      state->pos = state->len;
+      asyncRefreshLine(state);
+    }
+    return LN_FEED_MORE;
+  }
+
+  // Handle Ctrl+B — move left
+  if (c == 2) {
+    if (state->pos > 0) {
+      --state->pos;
+      asyncRefreshLine(state);
+    }
+    return LN_FEED_MORE;
+  }
+
+  // Handle Ctrl+F — move right
+  if (c == 6) {
+    if (state->pos < state->len) {
+      ++state->pos;
+      asyncRefreshLine(state);
+    }
+    return LN_FEED_MORE;
+  }
+
+  // Handle Ctrl+K — kill to end of line
+  if (c == 11) {
+    state->buf32[state->pos] = '\0';
+    state->len = state->pos;
+    recomputeCharacterWidths(state->buf32, state->charWidths, state->len);
+    state->getBufferCacheDirty = true;
+    asyncRefreshLine(state);
+    return LN_FEED_MORE;
+  }
+
+  // Handle Ctrl+U — kill to start of line
+  if (c == 21) {
+    if (state->pos > 0) {
+      memmove(state->buf32, state->buf32 + state->pos,
+              sizeof(char32_t) * (state->len - state->pos + 1));
+      state->len -= state->pos;
+      state->pos = 0;
+      recomputeCharacterWidths(state->buf32, state->charWidths, state->len);
+      state->getBufferCacheDirty = true;
+      asyncRefreshLine(state);
+    }
+    return LN_FEED_MORE;
+  }
+
+  // Handle Ctrl+L — clear screen and redraw
+  if (c == 12) {
+    if (!state->silent) {
+      if (write(1, "\x1b[H\x1b[2J", 7) == -1) {
+        // ignore
+      }
+    }
+    asyncRefreshLine(state);
+    return LN_FEED_MORE;
+  }
+
+  // Handle Ctrl+T — transpose
+  if (c == 20) {
+    if (state->pos > 0 && state->len > 1) {
+      int swapPos = (state->pos == state->len) ? state->pos - 2 : state->pos - 1;
+      char32_t tmp = state->buf32[swapPos];
+      state->buf32[swapPos] = state->buf32[swapPos + 1];
+      state->buf32[swapPos + 1] = tmp;
+      if (state->pos != state->len) {
+        ++state->pos;
+      }
+      recomputeCharacterWidths(state->buf32, state->charWidths, state->len);
+      state->getBufferCacheDirty = true;
+      asyncRefreshLine(state);
+    }
+    return LN_FEED_MORE;
+  }
+
+  // Handle Ctrl+W — kill word left
+  if (c == 23) {
+    if (state->pos > 0) {
+      int startingPos = state->pos;
+      while (state->pos > 0 && state->buf32[state->pos - 1] == ' ') {
+        --state->pos;
+      }
+      while (state->pos > 0 && state->buf32[state->pos - 1] != ' ') {
+        --state->pos;
+      }
+      memmove(state->buf32 + state->pos, state->buf32 + startingPos,
+              sizeof(char32_t) * (state->len - startingPos + 1));
+      state->len -= startingPos - state->pos;
+      recomputeCharacterWidths(state->buf32, state->charWidths, state->len);
+      state->getBufferCacheDirty = true;
+      asyncRefreshLine(state);
+    }
+    return LN_FEED_MORE;
+  }
+
+  // Skip other control characters
+  if (c < 32 || c == 0x7F) {
+    return LN_FEED_MORE;
+  }
+
+  // Self-insert printable character
+  if (state->len < LINENOISE_MAX_LINE - 1) {
+    if (state->len == state->pos) {
+      // Append at end
+      state->buf32[state->pos] = c;
+      ++state->pos;
+      ++state->len;
+      state->buf32[state->len] = '\0';
+    } else if (state->insertMode) {
+      // Insert in middle
+      memmove(state->buf32 + state->pos + 1, state->buf32 + state->pos,
+              sizeof(char32_t) * (state->len - state->pos));
+      state->buf32[state->pos] = c;
+      ++state->len;
+      ++state->pos;
+      state->buf32[state->len] = '\0';
+    } else {
+      // Overwrite
+      state->buf32[state->pos] = c;
+      ++state->pos;
+    }
+    recomputeCharacterWidths(state->buf32, state->charWidths, state->len);
+    state->getBufferCacheDirty = true;
+    asyncRefreshLine(state);
+  }
+
+  return LN_FEED_MORE;
+}
+
+// Process an escape sequence from accumulated bytes
+static int asyncProcessEscape(linenoiseState* state) {
+  if (state->escLen < 2) return LN_FEED_MORE;
+
+  // ESC [ sequences
+  if (state->escBuf[0] == '[') {
+    if (state->escLen == 2) {
+      switch (state->escBuf[1]) {
+        case 'A':  // Up arrow — no history in async mode
+          beep();
+          return LN_FEED_MORE;
+        case 'B':  // Down arrow — no history in async mode
+          beep();
+          return LN_FEED_MORE;
+        case 'C':  // Right arrow
+          return asyncProcessChar(state, 6);  // same as Ctrl+F
+        case 'D':  // Left arrow
+          return asyncProcessChar(state, 2);  // same as Ctrl+B
+        case 'H':  // Home
+          return asyncProcessChar(state, 1);  // same as Ctrl+A
+        case 'F':  // End
+          return asyncProcessChar(state, 5);  // same as Ctrl+E
+        default:
+          break;
+      }
+    }
+    // ESC [ 3 ~ — Delete
+    if (state->escLen == 3 && state->escBuf[1] == '3' && state->escBuf[2] == '~') {
+      return asyncProcessChar(state, 4);  // same as Ctrl+D (delete)
+    }
+    // ESC [ 1 ; 5 C/D — Ctrl+Right/Left (word movement)
+    if (state->escLen == 5 && state->escBuf[1] == '1' && state->escBuf[2] == ';' &&
+        state->escBuf[3] == '5') {
+      if (state->escBuf[4] == 'C') {
+        // Ctrl+Right — move word right
+        while (state->pos < state->len && state->buf32[state->pos] == ' ') {
+          ++state->pos;
+        }
+        while (state->pos < state->len && state->buf32[state->pos] != ' ') {
+          ++state->pos;
+        }
+        asyncRefreshLine(state);
+        return LN_FEED_MORE;
+      }
+      if (state->escBuf[4] == 'D') {
+        // Ctrl+Left — move word left
+        while (state->pos > 0 && state->buf32[state->pos - 1] == ' ') {
+          --state->pos;
+        }
+        while (state->pos > 0 && state->buf32[state->pos - 1] != ' ') {
+          --state->pos;
+        }
+        asyncRefreshLine(state);
+        return LN_FEED_MORE;
+      }
+    }
+  }
+  // ESC O sequences (alternative Home/End)
+  else if (state->escBuf[0] == 'O') {
+    if (state->escLen == 2) {
+      switch (state->escBuf[1]) {
+        case 'H':  // Home
+          return asyncProcessChar(state, 1);
+        case 'F':  // End
+          return asyncProcessChar(state, 5);
+        default:
+          break;
+      }
+    }
+  }
+
+  // Unknown sequence — discard
+  state->escLen = 0;
+  return LN_FEED_MORE;
+}
+
+linenoiseState* linenoiseEditStart(const char* prompt) {
+  linenoiseState* state = new linenoiseState();
+  // Initialize editing buffer (only first element matters; len=0)
+  state->buf32[0] = 0;
+  state->charWidths[0] = 0;
+  state->len = 0;
+  state->pos = 0;
+  state->insertMode = true;
+  state->rawModeEnabled = false;
+  state->silent = false;
+  state->result = LN_FEED_MORE;
+  state->keyType = 0;
+  state->inputMode = ASYNC_NORMAL;
+  state->utf8Len = 0;
+  state->utf8Expected = 0;
+  state->escLen = 0;
+  state->getBufferCacheDirty = true;
+
+  if (prompt) {
+    state->prompt = prompt;
+  }
+
+  if (rawModeRefCount == 0) {
+    if (enableRawMode() == 0) {
+      state->rawModeEnabled = true;
+    }
+  } else {
+    // Raw mode already active from another session
+    state->rawModeEnabled = true;
+  }
+  if (state->rawModeEnabled) {
+    ++rawModeRefCount;
+  }
+
+  // Display prompt
+  if (!state->silent && !state->prompt.empty()) {
+    if (write(1, state->prompt.c_str(), state->prompt.size()) == -1) {
+      // ignore write error
+    }
+  }
+
+  return state;
+}
+
+int linenoiseEditFeed(linenoiseState* state, char c) {
+  if (!state) return LN_FEED_ABORT;
+  if (state->result != LN_FEED_MORE) return state->result;
+
+  unsigned char uc = static_cast<unsigned char>(c);
+
+  switch (state->inputMode) {
+    case ASYNC_ESC:
+      // First byte after ESC — determines sequence type
+      state->escBuf[0] = uc;
+      state->escLen = 1;
+      if (uc == '[' || uc == 'O') {
+        state->inputMode = ASYNC_ESC_SEQ;
+        return LN_FEED_MORE;
+      }
+      // Unknown ESC + char — discard
+      state->escLen = 0;
+      state->inputMode = ASYNC_NORMAL;
+      return LN_FEED_MORE;
+
+    case ASYNC_ESC_SEQ: {
+      // Accumulating escape sequence bytes
+      if (state->escLen < 15) {
+        state->escBuf[state->escLen++] = uc;
+      } else {
+        // Overflow — discard
+        state->escLen = 0;
+        state->inputMode = ASYNC_NORMAL;
+        return LN_FEED_MORE;
+      }
+      // Check if sequence is complete (ends with letter or ~)
+      if ((uc >= 'A' && uc <= 'Z') || (uc >= 'a' && uc <= 'z') || uc == '~') {
+        int rv = asyncProcessEscape(state);
+        state->escLen = 0;
+        state->inputMode = ASYNC_NORMAL;
+        return rv;
+      }
+      // Still accumulating (digits, semicolons)
+      return LN_FEED_MORE;
+    }
+
+    case ASYNC_UTF8:
+      // Accumulating UTF-8 continuation bytes
+      if ((uc & 0xC0) == 0x80) {
+        state->utf8Buf[state->utf8Len++] = uc;
+        if (state->utf8Len == state->utf8Expected) {
+          char32_t decoded = utf8Decode(state->utf8Buf, state->utf8Len);
+          state->utf8Len = 0;
+          state->utf8Expected = 0;
+          state->inputMode = ASYNC_NORMAL;
+          return asyncProcessChar(state, decoded);
+        }
+        return LN_FEED_MORE;
+      }
+      // Invalid continuation — reset and fall through
+      state->utf8Len = 0;
+      state->utf8Expected = 0;
+      state->inputMode = ASYNC_NORMAL;
+      break;  // fall through to ASYNC_NORMAL processing
+
+    case ASYNC_NORMAL:
+      break;  // handled below
+  }
+
+  // ASYNC_NORMAL: process a new byte
+
+  // ESC starts an escape sequence
+  if (uc == 0x1B) {
+    state->inputMode = ASYNC_ESC;
+    return LN_FEED_MORE;
+  }
+
+  // Check for multi-byte UTF-8 sequence start
+  int expected = utf8ExpectedBytes(uc);
+  if (expected > 1) {
+    state->utf8Buf[0] = uc;
+    state->utf8Len = 1;
+    state->utf8Expected = expected;
+    state->inputMode = ASYNC_UTF8;
+    return LN_FEED_MORE;
+  }
+
+  // Single-byte character
+  return asyncProcessChar(state, static_cast<char32_t>(uc));
+}
+
+char* linenoiseEditGetLine(linenoiseState* state) {
+  if (!state || state->result != LN_FEED_DONE) return NULL;
+  size_t bufferSize = sizeof(char32_t) * state->len + 1;
+  unique_ptr<char[]> buf8(new char[bufferSize]);
+  copyString32to8(buf8.get(), bufferSize, state->buf32);
+  return strdup(buf8.get());
+}
+
+void linenoiseEditStop(linenoiseState* state) {
+  if (!state) return;
+  if (state->rawModeEnabled) {
+    --rawModeRefCount;
+    if (rawModeRefCount <= 0) {
+      rawModeRefCount = 0;
+      disableRawMode();
+    }
+  }
+  if (!state->silent) {
+    if (write(1, "\n", 1) == -1) {
+      // ignore
+    }
+  }
+  delete state;
+}
+
+int linenoiseEditFd(linenoiseState*) {
+  return STDIN_FILENO;
+}
+
+const char* linenoiseEditGetBuffer(linenoiseState* state, int* cursor_pos, int* len) {
+  if (!state) {
+    if (cursor_pos) *cursor_pos = 0;
+    if (len) *len = 0;
+    return "";
+  }
+  if (cursor_pos) *cursor_pos = state->pos;
+  if (len) *len = state->len;
+  if (state->getBufferCacheDirty || state->getBufferCache.empty()) {
+    size_t bufferSize = sizeof(char32_t) * state->len + 1;
+    unique_ptr<char[]> buf8(new char[bufferSize]);
+    copyString32to8(buf8.get(), bufferSize, state->buf32);
+    state->getBufferCache = buf8.get();
+    state->getBufferCacheDirty = false;
+  }
+  return state->getBufferCache.c_str();
+}
+
+void linenoiseEditSetSilent(linenoiseState* state, int silent) {
+  if (state) {
+    state->silent = (silent != 0);
+  }
+}
+
+int linenoiseEditKeyType(linenoiseState* state) {
+  if (!state) return 0;
+  return state->keyType;
 }

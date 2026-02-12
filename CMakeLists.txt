@@ -29,6 +29,7 @@ set(CPP_SRC
     src/linenoise/wcwidth.cpp
 )
 set(QPP_SRC
+    src/QC_AbstractHistoryProvider.qpp
     src/linenoise.qpp
 )
 

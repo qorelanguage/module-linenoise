@@ -91,6 +91,52 @@ class LinenoiseTest inherits Test {
         addTestCase("bind_key() invalid key spec", \testBindKeyInvalidSpec());
         addTestCase("unbind_key() invalid key spec", \testUnbindKeyInvalidSpec());
 
+        # History provider tests
+        addTestCase("set_history_provider() basic set", \testSetHistoryProvider());
+        addTestCase("set_history_provider() clear with NOTHING", \testSetHistoryProviderClear());
+        addTestCase("set_history_provider() replace provider", \testSetHistoryProviderReplace());
+        addTestCase("set_history_provider() with search override", \testSetHistoryProviderWithSearch());
+        addTestCase("internal history works with provider set", \testHistoryIndependentWithProvider());
+
+        # Async editing API tests
+        addTestCase("edit_start/stop session lifecycle", \testEditStartStop());
+        addTestCase("edit_feed basic text and enter", \testEditFeedBasicText());
+        addTestCase("edit_feed ctrl-c abort", \testEditFeedCtrlC());
+        addTestCase("edit_feed ctrl-d exit on empty", \testEditFeedCtrlDEmpty());
+        addTestCase("edit_feed ctrl-d delete non-empty", \testEditFeedCtrlDNonEmpty());
+        addTestCase("edit_feed backspace", \testEditFeedBackspace());
+        addTestCase("edit_feed ctrl-k kill to end", \testEditFeedCtrlK());
+        addTestCase("edit_feed ctrl-u kill to start", \testEditFeedCtrlU());
+        addTestCase("edit_feed ctrl-a ctrl-e movement", \testEditFeedMovement());
+        addTestCase("edit_feed ctrl-w kill word left", \testEditFeedCtrlW());
+        addTestCase("edit_get_buffer returns buffer state", \testEditGetBuffer());
+        addTestCase("edit_feed UTF-8 multi-byte", \testEditFeedUTF8());
+        addTestCase("edit_feed invalid session", \testEditFeedInvalidSession());
+        addTestCase("edit_stop invalid session", \testEditStopInvalidSession());
+        addTestCase("edit_start multiple sessions", \testEditMultipleSessions());
+        addTestCase("edit_get_buffer dirty after destructive edits", \testEditGetBufferDirtyAfterEdits());
+        addTestCase("edit_key_type returns correct key type", \testEditKeyType());
+        addTestCase("edit_key_type invalid session", \testEditKeyTypeInvalidSession());
+
+        # Async escape sequence tests
+        addTestCase("edit_feed arrow left/right movement", \testEditFeedArrowLeftRight());
+        addTestCase("edit_feed Home/End keys", \testEditFeedHomeEnd());
+        addTestCase("edit_feed Delete key (ESC[3~)", \testEditFeedDeleteKey());
+        addTestCase("edit_feed Ctrl+Left/Right word movement", \testEditFeedCtrlArrowWordMove());
+        addTestCase("edit_feed ESC O H/F alt Home/End", \testEditFeedEscOHomeEnd());
+        addTestCase("edit_feed Ctrl+T transpose", \testEditFeedCtrlT());
+        addTestCase("edit_feed Ctrl+L clear screen", \testEditFeedCtrlL());
+        addTestCase("edit_feed unknown escape sequence discarded", \testEditFeedUnknownEscape());
+
+        # Additional edge case tests
+        addTestCase("edit_fd returns valid descriptor", \testEditFd());
+        addTestCase("edit_feed invalid UTF-8 handled gracefully", \testEditFeedInvalidUTF8());
+        addTestCase("edit_feed near max buffer length", \testEditFeedNearMaxBuffer());
+        addTestCase("edit_get_line invalid session", \testEditGetLineInvalidSession());
+        addTestCase("edit_get_buffer invalid session", \testEditGetBufferInvalidSession());
+        addTestCase("edit_get_line returns NOTHING when not done", \testEditGetLineNotDone());
+        addTestCase("edit_feed after completion returns cached result", \testEditFeedAfterDone());
+
         # Negative tests
         addTestCase("history_set_max_len() rejects zero", \testSetMaxLenZero());
         addTestCase("history_set_max_len() rejects negative", \testSetMaxLenNegative());
@@ -601,6 +647,786 @@ class LinenoiseTest inherits Test {
         });
     }
 
+    # ==================== History Provider Tests ====================
+
+    testSetHistoryProvider() {
+        resetHistory();
+        auto provider = new TestHistoryProvider(("line1", "line2", "line3"));
+
+        # Set provider with class instance
+        assertNothing(Linenoise::set_history_provider(provider));
+
+        # Clear provider after test
+        Linenoise::set_history_provider();
+    }
+
+    testSetHistoryProviderClear() {
+        resetHistory();
+        auto provider = new TestHistoryProvider(("a", "b"));
+
+        # Set provider
+        Linenoise::set_history_provider(provider);
+
+        # Clear with NOTHING — should not throw
+        assertNothing(Linenoise::set_history_provider());
+
+        # Clear again — idempotent
+        assertNothing(Linenoise::set_history_provider());
+    }
+
+    testSetHistoryProviderReplace() {
+        resetHistory();
+        auto provider1 = new TestHistoryProvider(("x",));
+        auto provider2 = new TestHistoryProvider(("y",));
+
+        # Set first provider
+        Linenoise::set_history_provider(provider1);
+
+        # Replace with second provider — should not leak
+        assertNothing(Linenoise::set_history_provider(provider2));
+
+        # Cleanup
+        Linenoise::set_history_provider();
+    }
+
+    testSetHistoryProviderWithSearch() {
+        resetHistory();
+        auto provider = new TestHistoryProviderWithSearch(("foo bar", "baz quux"));
+
+        # Set provider with search override
+        assertNothing(Linenoise::set_history_provider(provider));
+
+        # Cleanup
+        Linenoise::set_history_provider();
+    }
+
+    testHistoryIndependentWithProvider() {
+        resetHistory();
+        auto provider = new TestHistoryProvider(("ext1",));
+
+        # Set a provider
+        Linenoise::set_history_provider(provider);
+
+        # Internal history functions should still work independently
+        Linenoise::history_add("internal1");
+        Linenoise::history_add("internal2");
+        list<auto> h = Linenoise::history();
+        assertEq(2, h.size());
+        assertEq("internal1", h[0]);
+        assertEq("internal2", h[1]);
+
+        # Cleanup
+        Linenoise::set_history_provider();
+    }
+
+    # ==================== Async Editing API Tests ====================
+
+    testEditStartStop() {
+        # Basic session lifecycle: start, set silent, stop
+        int sid = Linenoise::edit_start("test> ");
+        assertGt(0, sid);
+        Linenoise::edit_set_silent(sid, True);
+        assertNothing(Linenoise::edit_stop(sid));
+    }
+
+    testEditFeedBasicText() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        # Feed "hello" character by character
+        assertEq(0, Linenoise::edit_feed(sid, ord("h")));
+        assertEq(0, Linenoise::edit_feed(sid, ord("e")));
+        assertEq(0, Linenoise::edit_feed(sid, ord("l")));
+        assertEq(0, Linenoise::edit_feed(sid, ord("l")));
+        assertEq(0, Linenoise::edit_feed(sid, ord("o")));
+
+        # Feed Enter (carriage return) to accept
+        assertEq(1, Linenoise::edit_feed(sid, 13));
+
+        # Get the completed line
+        *string line = Linenoise::edit_get_line(sid);
+        assertEq("hello", line);
+
+        Linenoise::edit_stop(sid);
+    }
+
+    testEditFeedCtrlC() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        # Feed some text
+        Linenoise::edit_feed(sid, ord("a"));
+        Linenoise::edit_feed(sid, ord("b"));
+
+        # Feed Ctrl+C (byte 3) — should return ABORT (-1)
+        assertEq(-1, Linenoise::edit_feed(sid, 3));
+
+        Linenoise::edit_stop(sid);
+    }
+
+    testEditFeedCtrlDEmpty() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        # Feed Ctrl+D (byte 4) on empty line — should return EXIT (-2)
+        assertEq(-2, Linenoise::edit_feed(sid, 4));
+
+        Linenoise::edit_stop(sid);
+    }
+
+    testEditFeedCtrlDNonEmpty() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        # Feed "ab" then move left then Ctrl+D to delete 'b'
+        Linenoise::edit_feed(sid, ord("a"));
+        Linenoise::edit_feed(sid, ord("b"));
+        # Ctrl+B (byte 2) to move left
+        Linenoise::edit_feed(sid, 2);
+        # Ctrl+D (byte 4) — should delete 'b', not exit
+        assertEq(0, Linenoise::edit_feed(sid, 4));
+
+        # Accept the line
+        Linenoise::edit_feed(sid, 13);
+        *string line = Linenoise::edit_get_line(sid);
+        assertEq("a", line);
+
+        Linenoise::edit_stop(sid);
+    }
+
+    testEditFeedBackspace() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        # Feed "abc" then backspace to delete 'c'
+        Linenoise::edit_feed(sid, ord("a"));
+        Linenoise::edit_feed(sid, ord("b"));
+        Linenoise::edit_feed(sid, ord("c"));
+        # Backspace (byte 127)
+        Linenoise::edit_feed(sid, 127);
+
+        Linenoise::edit_feed(sid, 13);
+        *string line = Linenoise::edit_get_line(sid);
+        assertEq("ab", line);
+
+        Linenoise::edit_stop(sid);
+    }
+
+    testEditFeedCtrlK() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        # Feed "abcde"
+        foreach string ch in ("a", "b", "c", "d", "e") {
+            Linenoise::edit_feed(sid, ord(ch));
+        }
+        # Move to position 2 (Ctrl+A then Ctrl+F twice)
+        Linenoise::edit_feed(sid, 1);  # Ctrl+A — home
+        Linenoise::edit_feed(sid, 6);  # Ctrl+F — right
+        Linenoise::edit_feed(sid, 6);  # Ctrl+F — right
+        # Ctrl+K (byte 11) — kill to end
+        Linenoise::edit_feed(sid, 11);
+
+        Linenoise::edit_feed(sid, 13);
+        *string line = Linenoise::edit_get_line(sid);
+        assertEq("ab", line);
+
+        Linenoise::edit_stop(sid);
+    }
+
+    testEditFeedCtrlU() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        # Feed "abcde"
+        foreach string ch in ("a", "b", "c", "d", "e") {
+            Linenoise::edit_feed(sid, ord(ch));
+        }
+        # Move left twice (Ctrl+B x2), putting cursor at position 3
+        Linenoise::edit_feed(sid, 2);  # Ctrl+B — left
+        Linenoise::edit_feed(sid, 2);  # Ctrl+B — left
+        # Ctrl+U (byte 21) — kill to start
+        Linenoise::edit_feed(sid, 21);
+
+        Linenoise::edit_feed(sid, 13);
+        *string line = Linenoise::edit_get_line(sid);
+        assertEq("de", line);
+
+        Linenoise::edit_stop(sid);
+    }
+
+    testEditFeedMovement() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        # Feed "abc"
+        Linenoise::edit_feed(sid, ord("a"));
+        Linenoise::edit_feed(sid, ord("b"));
+        Linenoise::edit_feed(sid, ord("c"));
+
+        # Ctrl+A (home), then type "X" — should insert at start
+        Linenoise::edit_feed(sid, 1);  # Ctrl+A
+        Linenoise::edit_feed(sid, ord("X"));
+
+        # Ctrl+E (end), then type "Y" — should append
+        Linenoise::edit_feed(sid, 5);  # Ctrl+E
+        Linenoise::edit_feed(sid, ord("Y"));
+
+        Linenoise::edit_feed(sid, 13);
+        *string line = Linenoise::edit_get_line(sid);
+        assertEq("XabcY", line);
+
+        Linenoise::edit_stop(sid);
+    }
+
+    testEditFeedCtrlW() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        # Feed "hello world"
+        foreach string ch in ("h", "e", "l", "l", "o", " ", "w", "o", "r", "l", "d") {
+            Linenoise::edit_feed(sid, ord(ch));
+        }
+        # Ctrl+W (byte 23) — kill word left (kills "world")
+        Linenoise::edit_feed(sid, 23);
+
+        Linenoise::edit_feed(sid, 13);
+        *string line = Linenoise::edit_get_line(sid);
+        assertEq("hello ", line);
+
+        Linenoise::edit_stop(sid);
+    }
+
+    testEditGetBuffer() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        # Feed "abc"
+        Linenoise::edit_feed(sid, ord("a"));
+        Linenoise::edit_feed(sid, ord("b"));
+        Linenoise::edit_feed(sid, ord("c"));
+
+        hash<auto> buf = Linenoise::edit_get_buffer(sid);
+        assertEq("abc", buf.text);
+        assertEq(3, buf.cursor);
+        assertEq(3, buf.len);
+
+        # Move left
+        Linenoise::edit_feed(sid, 2);  # Ctrl+B
+        buf = Linenoise::edit_get_buffer(sid);
+        assertEq("abc", buf.text);
+        assertEq(2, buf.cursor);
+        assertEq(3, buf.len);
+
+        Linenoise::edit_stop(sid);
+    }
+
+    testEditFeedUTF8() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        # Feed UTF-8 bytes for "é" (U+00E9): 0xC3 0xA9
+        Linenoise::edit_feed(sid, 0xC3);
+        Linenoise::edit_feed(sid, 0xA9);
+
+        # Feed ASCII 'a'
+        Linenoise::edit_feed(sid, ord("a"));
+
+        # Accept
+        Linenoise::edit_feed(sid, 13);
+        *string line = Linenoise::edit_get_line(sid);
+        assertEq("éa", line);
+
+        Linenoise::edit_stop(sid);
+    }
+
+    testEditFeedInvalidSession() {
+        # Feed to non-existent session should throw
+        assertThrows("LINENOISE-SESSION-ERROR", sub () {
+            Linenoise::edit_feed(99999, ord("a"));
+        });
+    }
+
+    testEditStopInvalidSession() {
+        # Stop non-existent session should throw
+        assertThrows("LINENOISE-SESSION-ERROR", sub () {
+            Linenoise::edit_stop(99999);
+        });
+    }
+
+    testEditMultipleSessions() {
+        # Create two sessions
+        int sid1 = Linenoise::edit_start("s1> ");
+        Linenoise::edit_set_silent(sid1, True);
+        int sid2 = Linenoise::edit_start("s2> ");
+        Linenoise::edit_set_silent(sid2, True);
+
+        # Session IDs should be different
+        assertNeq(sid1, sid2);
+
+        # Feed different text to each
+        Linenoise::edit_feed(sid1, ord("A"));
+        Linenoise::edit_feed(sid2, ord("B"));
+
+        # Check buffers
+        hash<auto> buf1 = Linenoise::edit_get_buffer(sid1);
+        hash<auto> buf2 = Linenoise::edit_get_buffer(sid2);
+        assertEq("A", buf1.text);
+        assertEq("B", buf2.text);
+
+        # Stop both
+        Linenoise::edit_stop(sid1);
+        Linenoise::edit_stop(sid2);
+    }
+
+    testEditGetBufferDirtyAfterEdits() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        # Feed "abcde"
+        foreach string ch in ("a", "b", "c", "d", "e") {
+            Linenoise::edit_feed(sid, ord(ch));
+        }
+
+        # Verify initial buffer
+        hash<auto> buf = Linenoise::edit_get_buffer(sid);
+        assertEq("abcde", buf.text);
+
+        # Backspace should update cache
+        Linenoise::edit_feed(sid, 127);
+        buf = Linenoise::edit_get_buffer(sid);
+        assertEq("abcd", buf.text, "buffer cache dirty after backspace");
+
+        # Ctrl+K (kill to end) after moving to pos 2
+        Linenoise::edit_feed(sid, 1);  # Ctrl+A — home
+        Linenoise::edit_feed(sid, 6);  # Ctrl+F — right
+        Linenoise::edit_feed(sid, 6);  # Ctrl+F — right
+        Linenoise::edit_feed(sid, 11); # Ctrl+K
+        buf = Linenoise::edit_get_buffer(sid);
+        assertEq("ab", buf.text, "buffer cache dirty after Ctrl+K");
+
+        Linenoise::edit_stop(sid);
+
+        # Test Ctrl+U
+        sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+        foreach string ch in ("x", "y", "z") {
+            Linenoise::edit_feed(sid, ord(ch));
+        }
+        Linenoise::edit_feed(sid, 21); # Ctrl+U
+        buf = Linenoise::edit_get_buffer(sid);
+        assertEq("", buf.text, "buffer cache dirty after Ctrl+U");
+        Linenoise::edit_stop(sid);
+
+        # Test Ctrl+W (kill word)
+        sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+        foreach string ch in ("h", "i", " ", "b", "y", "e") {
+            Linenoise::edit_feed(sid, ord(ch));
+        }
+        Linenoise::edit_feed(sid, 23); # Ctrl+W
+        buf = Linenoise::edit_get_buffer(sid);
+        assertEq("hi ", buf.text, "buffer cache dirty after Ctrl+W");
+        Linenoise::edit_stop(sid);
+
+        # Test Ctrl+T (transpose)
+        sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+        Linenoise::edit_feed(sid, ord("a"));
+        Linenoise::edit_feed(sid, ord("b"));
+        Linenoise::edit_feed(sid, 20); # Ctrl+T
+        buf = Linenoise::edit_get_buffer(sid);
+        assertEq("ba", buf.text, "buffer cache dirty after Ctrl+T");
+        Linenoise::edit_stop(sid);
+
+        # Test Ctrl+D (delete) on non-empty
+        sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+        Linenoise::edit_feed(sid, ord("a"));
+        Linenoise::edit_feed(sid, ord("b"));
+        Linenoise::edit_feed(sid, 1);  # Ctrl+A — home
+        Linenoise::edit_feed(sid, 4);  # Ctrl+D — delete under cursor
+        buf = Linenoise::edit_get_buffer(sid);
+        assertEq("b", buf.text, "buffer cache dirty after Ctrl+D delete");
+        Linenoise::edit_stop(sid);
+    }
+
+    testEditKeyType() {
+        # Test Enter key type (0)
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+        Linenoise::edit_feed(sid, ord("a"));
+        Linenoise::edit_feed(sid, 13);  # Enter
+        assertEq(0, Linenoise::edit_key_type(sid));
+        Linenoise::edit_stop(sid);
+
+        # Test Ctrl+C key type (1)
+        sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+        Linenoise::edit_feed(sid, 3);  # Ctrl+C
+        assertEq(1, Linenoise::edit_key_type(sid));
+        Linenoise::edit_stop(sid);
+
+        # Test Ctrl+D on empty key type (2)
+        sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+        Linenoise::edit_feed(sid, 4);  # Ctrl+D on empty
+        assertEq(2, Linenoise::edit_key_type(sid));
+        Linenoise::edit_stop(sid);
+    }
+
+    testEditKeyTypeInvalidSession() {
+        assertThrows("LINENOISE-SESSION-ERROR", sub () {
+            Linenoise::edit_key_type(99999);
+        });
+    }
+
+    # ==================== Async Escape Sequence Tests ====================
+
+    testEditFeedArrowLeftRight() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        # Feed "abc"
+        foreach string ch in ("a", "b", "c") {
+            Linenoise::edit_feed(sid, ord(ch));
+        }
+
+        # Left arrow (ESC [ D) — move cursor left
+        Linenoise::edit_feed(sid, 0x1B);
+        Linenoise::edit_feed(sid, ord("["));
+        Linenoise::edit_feed(sid, ord("D"));
+
+        hash<auto> buf = Linenoise::edit_get_buffer(sid);
+        assertEq("abc", buf.text);
+        assertEq(2, buf.cursor, "cursor moved left by arrow key");
+
+        # Right arrow (ESC [ C) — move cursor right
+        Linenoise::edit_feed(sid, 0x1B);
+        Linenoise::edit_feed(sid, ord("["));
+        Linenoise::edit_feed(sid, ord("C"));
+
+        buf = Linenoise::edit_get_buffer(sid);
+        assertEq(3, buf.cursor, "cursor moved right by arrow key");
+
+        # Insert at cursor position after left arrow
+        Linenoise::edit_feed(sid, 0x1B);
+        Linenoise::edit_feed(sid, ord("["));
+        Linenoise::edit_feed(sid, ord("D"));  # move left to pos 2
+        Linenoise::edit_feed(sid, ord("X"));  # insert X at pos 2
+
+        Linenoise::edit_feed(sid, 13);  # Enter
+        *string line = Linenoise::edit_get_line(sid);
+        assertEq("abXc", line, "insert after arrow movement");
+
+        Linenoise::edit_stop(sid);
+    }
+
+    testEditFeedHomeEnd() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        foreach string ch in ("a", "b", "c", "d") {
+            Linenoise::edit_feed(sid, ord(ch));
+        }
+
+        # Home (ESC [ H) — move to start
+        Linenoise::edit_feed(sid, 0x1B);
+        Linenoise::edit_feed(sid, ord("["));
+        Linenoise::edit_feed(sid, ord("H"));
+
+        hash<auto> buf = Linenoise::edit_get_buffer(sid);
+        assertEq(0, buf.cursor, "Home moves cursor to start");
+
+        # End (ESC [ F) — move to end
+        Linenoise::edit_feed(sid, 0x1B);
+        Linenoise::edit_feed(sid, ord("["));
+        Linenoise::edit_feed(sid, ord("F"));
+
+        buf = Linenoise::edit_get_buffer(sid);
+        assertEq(4, buf.cursor, "End moves cursor to end");
+
+        Linenoise::edit_stop(sid);
+    }
+
+    testEditFeedDeleteKey() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        foreach string ch in ("a", "b", "c") {
+            Linenoise::edit_feed(sid, ord(ch));
+        }
+
+        # Move to start
+        Linenoise::edit_feed(sid, 1);  # Ctrl+A
+
+        # Delete key (ESC [ 3 ~) — delete char under cursor
+        Linenoise::edit_feed(sid, 0x1B);
+        Linenoise::edit_feed(sid, ord("["));
+        Linenoise::edit_feed(sid, ord("3"));
+        Linenoise::edit_feed(sid, ord("~"));
+
+        Linenoise::edit_feed(sid, 13);  # Enter
+        *string line = Linenoise::edit_get_line(sid);
+        assertEq("bc", line, "Delete key removes char under cursor");
+
+        Linenoise::edit_stop(sid);
+    }
+
+    testEditFeedCtrlArrowWordMove() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        # Feed "hello world test"
+        foreach string ch in ("h", "e", "l", "l", "o", " ", "w", "o", "r", "l", "d",
+                              " ", "t", "e", "s", "t") {
+            Linenoise::edit_feed(sid, ord(ch));
+        }
+
+        # Ctrl+Left (ESC [ 1 ; 5 D) — move word left
+        Linenoise::edit_feed(sid, 0x1B);
+        Linenoise::edit_feed(sid, ord("["));
+        Linenoise::edit_feed(sid, ord("1"));
+        Linenoise::edit_feed(sid, ord(";"));
+        Linenoise::edit_feed(sid, ord("5"));
+        Linenoise::edit_feed(sid, ord("D"));
+
+        hash<auto> buf = Linenoise::edit_get_buffer(sid);
+        assertEq(12, buf.cursor, "Ctrl+Left moves to start of 'test'");
+
+        # Ctrl+Left again — move to start of "world"
+        Linenoise::edit_feed(sid, 0x1B);
+        Linenoise::edit_feed(sid, ord("["));
+        Linenoise::edit_feed(sid, ord("1"));
+        Linenoise::edit_feed(sid, ord(";"));
+        Linenoise::edit_feed(sid, ord("5"));
+        Linenoise::edit_feed(sid, ord("D"));
+
+        buf = Linenoise::edit_get_buffer(sid);
+        assertEq(6, buf.cursor, "Ctrl+Left moves to start of 'world'");
+
+        # Ctrl+Right (ESC [ 1 ; 5 C) — move word right
+        Linenoise::edit_feed(sid, 0x1B);
+        Linenoise::edit_feed(sid, ord("["));
+        Linenoise::edit_feed(sid, ord("1"));
+        Linenoise::edit_feed(sid, ord(";"));
+        Linenoise::edit_feed(sid, ord("5"));
+        Linenoise::edit_feed(sid, ord("C"));
+
+        buf = Linenoise::edit_get_buffer(sid);
+        assertEq(11, buf.cursor, "Ctrl+Right moves to end of 'world'");
+
+        Linenoise::edit_stop(sid);
+    }
+
+    testEditFeedEscOHomeEnd() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        foreach string ch in ("a", "b", "c") {
+            Linenoise::edit_feed(sid, ord(ch));
+        }
+
+        # ESC O H — alternative Home
+        Linenoise::edit_feed(sid, 0x1B);
+        Linenoise::edit_feed(sid, ord("O"));
+        Linenoise::edit_feed(sid, ord("H"));
+
+        hash<auto> buf = Linenoise::edit_get_buffer(sid);
+        assertEq(0, buf.cursor, "ESC O H moves cursor to start");
+
+        # ESC O F — alternative End
+        Linenoise::edit_feed(sid, 0x1B);
+        Linenoise::edit_feed(sid, ord("O"));
+        Linenoise::edit_feed(sid, ord("F"));
+
+        buf = Linenoise::edit_get_buffer(sid);
+        assertEq(3, buf.cursor, "ESC O F moves cursor to end");
+
+        Linenoise::edit_stop(sid);
+    }
+
+    testEditFeedCtrlT() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        # Feed "ab"
+        Linenoise::edit_feed(sid, ord("a"));
+        Linenoise::edit_feed(sid, ord("b"));
+
+        # Ctrl+T — transpose last two chars (at end of line)
+        Linenoise::edit_feed(sid, 20);
+
+        Linenoise::edit_feed(sid, 13);  # Enter
+        *string line = Linenoise::edit_get_line(sid);
+        assertEq("ba", line, "Ctrl+T transposes at end of line");
+
+        Linenoise::edit_stop(sid);
+
+        # Transpose in middle of line
+        sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        foreach string ch in ("a", "b", "c") {
+            Linenoise::edit_feed(sid, ord(ch));
+        }
+
+        # Move left to position 2 (between b and c), then transpose
+        Linenoise::edit_feed(sid, 0x1B);
+        Linenoise::edit_feed(sid, ord("["));
+        Linenoise::edit_feed(sid, ord("D"));  # left to pos 2
+        Linenoise::edit_feed(sid, 20);        # Ctrl+T: swap chars at pos 1 and 2
+
+        Linenoise::edit_feed(sid, 13);
+        line = Linenoise::edit_get_line(sid);
+        assertEq("acb", line, "Ctrl+T transposes in middle");
+
+        Linenoise::edit_stop(sid);
+    }
+
+    testEditFeedCtrlL() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        Linenoise::edit_feed(sid, ord("a"));
+        Linenoise::edit_feed(sid, ord("b"));
+
+        # Ctrl+L — clear screen, buffer should be unchanged
+        Linenoise::edit_feed(sid, 12);
+
+        hash<auto> buf = Linenoise::edit_get_buffer(sid);
+        assertEq("ab", buf.text, "Ctrl+L preserves buffer content");
+        assertEq(2, buf.cursor, "Ctrl+L preserves cursor position");
+
+        Linenoise::edit_stop(sid);
+    }
+
+    testEditFeedUnknownEscape() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        Linenoise::edit_feed(sid, ord("a"));
+
+        # Unknown ESC sequence — should be discarded silently
+        Linenoise::edit_feed(sid, 0x1B);
+        Linenoise::edit_feed(sid, ord("["));
+        Linenoise::edit_feed(sid, ord("9"));
+        Linenoise::edit_feed(sid, ord("Z"));  # unknown terminator
+
+        # Feed more regular text — should work normally
+        Linenoise::edit_feed(sid, ord("b"));
+
+        Linenoise::edit_feed(sid, 13);  # Enter
+        *string line = Linenoise::edit_get_line(sid);
+        assertEq("ab", line, "unknown escape sequence discarded cleanly");
+
+        Linenoise::edit_stop(sid);
+    }
+
+    # ==================== Additional Edge Case Tests ====================
+
+    testEditFd() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        int fd = Linenoise::edit_fd(sid);
+        # stdin is typically fd 0
+        assertEq(True, fd >= 0, "edit_fd returns non-negative file descriptor");
+
+        Linenoise::edit_stop(sid);
+    }
+
+    testEditFeedInvalidUTF8() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        # Feed a valid character first
+        Linenoise::edit_feed(sid, ord("a"));
+
+        # Feed invalid UTF-8: start of 2-byte sequence (0xC3) followed by
+        # non-continuation byte (0x41 = 'A' instead of 0x80-0xBF)
+        Linenoise::edit_feed(sid, 0xC3);
+        Linenoise::edit_feed(sid, 0x41);  # 'A' — not a valid continuation
+
+        # Feed valid char after to verify recovery
+        Linenoise::edit_feed(sid, ord("z"));
+
+        Linenoise::edit_feed(sid, 13);  # Enter
+        *string line = Linenoise::edit_get_line(sid);
+        # The invalid sequence should be handled gracefully — 'A' is processed
+        # as a new byte after the incomplete UTF-8 is reset
+        assertEq(True, exists line, "graceful recovery from invalid UTF-8");
+        assertEq(True, line.val(), "non-empty result after invalid UTF-8");
+
+        Linenoise::edit_stop(sid);
+    }
+
+    testEditFeedNearMaxBuffer() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        # LINENOISE_MAX_LINE is 4096, fill buffer close to limit
+        int count = 4090;
+        for (int i = 0; i < count; ++i) {
+            Linenoise::edit_feed(sid, ord("x"));
+        }
+
+        hash<auto> buf = Linenoise::edit_get_buffer(sid);
+        assertEq(count, buf.len, "buffer filled to near max");
+
+        # Characters beyond limit should be silently dropped
+        for (int i = 0; i < 20; ++i) {
+            Linenoise::edit_feed(sid, ord("y"));
+        }
+
+        buf = Linenoise::edit_get_buffer(sid);
+        # Buffer should not exceed LINENOISE_MAX_LINE - 1 (4095)
+        assertEq(True, buf.len <= 4095, "buffer does not exceed max line length");
+
+        Linenoise::edit_stop(sid);
+    }
+
+    testEditGetLineInvalidSession() {
+        assertThrows("LINENOISE-SESSION-ERROR", sub () {
+            Linenoise::edit_get_line(99999);
+        });
+    }
+
+    testEditGetBufferInvalidSession() {
+        assertThrows("LINENOISE-SESSION-ERROR", sub () {
+            Linenoise::edit_get_buffer(99999);
+        });
+    }
+
+    testEditGetLineNotDone() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        # Feed text but don't press Enter
+        Linenoise::edit_feed(sid, ord("a"));
+
+        # get_line should return NOTHING when session isn't done
+        *string line = Linenoise::edit_get_line(sid);
+        assertEq(True, !exists line, "edit_get_line returns NOTHING when not done");
+
+        Linenoise::edit_stop(sid);
+    }
+
+    testEditFeedAfterDone() {
+        int sid = Linenoise::edit_start("test> ");
+        Linenoise::edit_set_silent(sid, True);
+
+        Linenoise::edit_feed(sid, ord("a"));
+        int rv = Linenoise::edit_feed(sid, 13);  # Enter
+        assertEq(1, rv, "Enter returns LN_FEED_DONE");
+
+        # Feeding more bytes after completion should return cached result
+        rv = Linenoise::edit_feed(sid, ord("b"));
+        assertEq(1, rv, "subsequent feed returns cached DONE result");
+
+        Linenoise::edit_stop(sid);
+    }
+
     # ==================== Negative Tests ====================
 
     testSetMaxLenZero() {
@@ -802,6 +1628,48 @@ class LinenoiseTest inherits Test {
         assertEq("cycle2_line1", h[2]);
 
         unlink(filename);
+    }
+}
+
+class TestHistoryProvider inherits Linenoise::AbstractHistoryProvider {
+    private {
+        list<string> entries;
+        int pos;
+    }
+
+    constructor(list<string> e) {
+        entries = e;
+        pos = entries.size();
+    }
+
+    *string prev(string prefix) {
+        if (pos > 0) {
+            return entries[--pos];
+        }
+    }
+
+    *string next(string prefix) {
+        if (pos < entries.size() - 1) {
+            return entries[++pos];
+        }
+    }
+
+    nothing reset() {
+        pos = entries.size();
+    }
+}
+
+class TestHistoryProviderWithSearch inherits TestHistoryProvider {
+    constructor(list<string> e) : TestHistoryProvider(e) {
+    }
+
+    *string search(string pattern, int direction) {
+        # Simple search: find first entry containing pattern
+        foreach string entry in (entries) {
+            if (entry.find(pattern) >= 0) {
+                return entry;
+            }
+        }
     }
 }
 
